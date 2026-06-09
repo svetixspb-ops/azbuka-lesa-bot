@@ -1,0 +1,241 @@
+"""Серверный объект заказа Тёса — единый источник правды по составу и суммам.
+
+Реализует спецификацию «целостность заказа» (Клод): состав и арифметику держит
+КОД, модель только наполняет заказ через функции (tool calls) и озвучивает готовые
+числа. Это убирает два бага мультизаказов: потерю позиций и ошибки сумм.
+
+Состав:
+  order = {
+    "items":   { key: {name, unit_price, qty, line_total, volume_m3_each, stock} },
+    "services":[ {type, scope, note} ],
+    "delivery":{ method, address, note } | None,
+    "deadline": str | None,
+    "subtotal_materials": int, "total_estimate": int,
+  }
+Позиции находятся по каталогу (как и в остальном боте) — модель передаёт описание
+товара, код резолвит его в реальную позицию из наличия.
+"""
+from __future__ import annotations
+
+import math
+from datetime import datetime, timezone, timedelta
+from typing import Any
+
+import catalog
+
+_MSK = timezone(timedelta(hours=3))
+
+
+def new_order() -> dict[str, Any]:
+    return {"items": {}, "services": [], "delivery": None, "deadline": None,
+            "subtotal_materials": 0, "total_estimate": 0}
+
+
+def _recompute(order: dict[str, Any]) -> None:
+    sub = 0
+    for it in order["items"].values():
+        it["line_total"] = int(it["unit_price"]) * int(it["qty"])
+        sub += it["line_total"]
+    order["subtotal_materials"] = sub
+    # услуги пока без известных цен → в сумму не входят, идут строкой с пометкой
+    order["total_estimate"] = sub
+
+
+def _find_product(query: str, thickness=None, width=None, length=None,
+                  species=None) -> dict[str, Any] | None:
+    res = catalog.search(text=query, thickness_mm=thickness, width_mm=width,
+                         length_mm=length, species=species, limit=1)
+    if res:
+        return res[0]
+    res = catalog.search_loose(query, limit=1)
+    return res[0] if res else None
+
+
+def add_or_update_item(order: dict[str, Any], query: str, qty: float | None = None,
+                       target_m3: float | None = None) -> str:
+    """Добавить/обновить позицию. qty — штук, либо target_m3 — нужный объём."""
+    p = _find_product(query)
+    if not p:
+        return f"NOT_FOUND: «{query}» — в каталоге не нашёл, предложи аналог или изготовление."
+    v1 = catalog.piece_volume_m3(p.get("thickness_mm"), p.get("width_mm"),
+                                 p.get("length_mm"), p.get("diameter_mm"))
+    if qty is None and target_m3 is not None and v1:
+        qty = math.ceil(float(target_m3) / v1)
+    if qty is None:
+        return f"NEED_QTY: для «{p['name']}» уточни количество (штук или объём)."
+    key = p["name"]
+    order["items"][key] = {
+        "name": p["name"], "unit_price": int(p["price"]), "qty": int(qty),
+        "line_total": int(p["price"]) * int(qty),
+        "volume_m3_each": round(v1, 4) if v1 else None, "stock": p.get("count"),
+        "length_m": (p.get("length_mm") or 0) / 1000 or None,
+    }
+    _recompute(order)
+    short = "по объёму" if (target_m3 and qty) else ""
+    return (f"OK: {p['name']} — {int(qty)} шт × {int(p['price'])} ₽ = "
+            f"{order['items'][key]['line_total']:,} ₽ {short}".replace(",", " ").strip())
+
+
+def remove_item(order: dict[str, Any], query: str) -> str:
+    ql = query.lower()
+    for key in list(order["items"]):
+        if ql in key.lower() or all(w in key.lower() for w in ql.split() if len(w) > 3):
+            order["items"].pop(key)
+            _recompute(order)
+            return f"REMOVED: {key}"
+    return f"NOT_IN_ORDER: «{query}» не было в заказе."
+
+
+def set_service(order: dict[str, Any], type_: str, scope: str | None = None) -> str:
+    for s in order["services"]:
+        if s["type"].lower() == type_.lower():
+            s["scope"] = scope or s.get("scope")
+            return f"OK_SERVICE: {type_}"
+    order["services"].append({"type": type_, "scope": scope,
+                              "note": "стоимость рассчитает менеджер"})
+    return f"OK_SERVICE: {type_}"
+
+
+def set_delivery(order: dict[str, Any], method: str, address: str | None = None) -> str:
+    order["delivery"] = {"method": method, "address": address,
+                         "note": "стоимость уточнит менеджер" if method != "самовывоз" else None}
+    return f"OK_DELIVERY: {method}"
+
+
+def set_deadline(order: dict[str, Any], text: str) -> str:
+    order["deadline"] = text
+    return f"OK_DEADLINE: {text}"
+
+
+def render_state(order: dict[str, Any]) -> str:
+    """Краткий снимок заказа для контекста модели (она его озвучивает)."""
+    if not order["items"] and not order["services"]:
+        return "ЗАКАЗ ПУСТ."
+    lines = ["ТЕКУЩИЙ ЗАКАЗ (числа точные, считает код — озвучивай их, не пересчитывай):"]
+    for it in order["items"].values():
+        s = f"— {it['name']}: {it['qty']} шт × {it['unit_price']} ₽ = {it['line_total']:,} ₽".replace(",", " ")
+        if it.get("stock") is not None:
+            s += f" (в наличии {it['stock']})"
+        lines.append(s)
+    for sv in order["services"]:
+        lines.append(f"— услуга: {sv['type']}{' (' + sv['scope'] + ')' if sv.get('scope') else ''} — стоимость рассчитает менеджер")
+    if order.get("delivery"):
+        d = order["delivery"]
+        lines.append(f"— получение: {d['method']}{', ' + d['address'] if d.get('address') else ''}")
+    if order.get("deadline"):
+        lines.append(f"— срок: {order['deadline']}")
+    lines.append(f"ИТОГО предварительно: {order['total_estimate']:,} ₽ (точную подтвердит менеджер)".replace(",", " "))
+    return "\n".join(lines)
+
+
+def render_summary(order: dict[str, Any]) -> str:
+    """Полный снимок-резюме для фиксации заказа (правило 11)."""
+    if not order["items"]:
+        return "Готов сохранить ваш расчёт. Как удобнее продолжить?"
+    lines = ["Фиксирую заказ:"]
+    for it in order["items"].values():
+        lines.append(f"• {it['name']} — {it['qty']} шт × {it['unit_price']} ₽ = {it['line_total']:,} ₽".replace(",", " "))
+    for sv in order["services"]:
+        lines.append(f"• обработка: {sv['type']}{' (' + sv['scope'] + ')' if sv.get('scope') else ''} — стоимость рассчитает менеджер")
+    if order.get("delivery"):
+        d = order["delivery"]
+        lines.append(f"• получение: {d['method']}{', ' + d['address'] if d.get('address') else ''}"
+                     + (f" — {d['note']}" if d.get("note") else ""))
+    if order.get("deadline"):
+        lines.append(f"• срок: {order['deadline']}")
+    lines.append("")
+    lines.append(f"Итого предварительно: {order['total_estimate']:,} ₽".replace(",", " ")
+                 + " — точную сумму и стоимость обработки подтвердит менеджер.")
+    lines.append("Как удобнее продолжить?")
+    return "\n".join(lines)
+
+
+def has_pilomat(order: dict[str, Any]) -> bool:
+    kw = ("доск", "брус", "вагонк", "имитац", "планкен", "рейк", "блок", "балк")
+    names = " ".join(order["items"]).lower()
+    return any(k in names for k in kw)
+
+
+def to_packet(order: dict[str, Any], contact: dict[str, Any] | None = None,
+              session_id: str | None = None) -> dict[str, Any]:
+    """Собрать пакет заявки из заказа (для менеджера / хэндоффа в MAX)."""
+    positions = []
+    for it in order["items"].values():
+        positions.append({
+            "name": it["name"], "price": it["unit_price"], "qty": f"{it['qty']} шт",
+            "sum": it["line_total"],
+            "how": f"{it['qty']} шт × {it['unit_price']} = {it['line_total']:,} ₽".replace(",", " "),
+        })
+    d = order.get("delivery") or {}
+    delivery_str = None
+    if d:
+        delivery_str = d.get("method", "")
+        if d.get("address"):
+            delivery_str += f", {d['address']}"
+    contact = contact or {}
+    return {
+        "ts": datetime.now(_MSK).strftime("%Y-%m-%d %H:%M МСК"),
+        "session_id": session_id,
+        "name": contact.get("name"),
+        "contact": contact.get("contact"),
+        "preferred_time": contact.get("preferred_time"),
+        "delivery": delivery_str,
+        "deadline": order.get("deadline"),
+        "services": [f"{s['type']}{' (' + s['scope'] + ')' if s.get('scope') else ''}" for s in order["services"]],
+        "note": contact.get("note"),
+        "positions": positions,
+        "total": order["total_estimate"] or None,
+    }
+
+
+# Схемы функций для модели (OpenAI-совместимый формат tools).
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "add_or_update_item",
+        "description": "Добавить позицию в заказ или изменить её количество. Передай описание товара (тип+размеры) и количество в штуках (qty) ИЛИ нужный объём в кубометрах (target_m3). Если клиент задал количество оптом для нескольких ранее названных позиций («по 100», «тоже по 100») — вызови функцию для КАЖДОЙ позиции отдельно.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "товар с размерами, напр. «брус сухой строганный 20х45х3000» или «террасная доска лиственница 28х145х6000 палубная»"},
+            "qty": {"type": "integer", "description": "количество штук"},
+            "target_m3": {"type": "number", "description": "нужный объём в м³ (если задан кубами)"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "remove_item",
+        "description": "Убрать позицию из заказа (клиент отказался от неё).",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "какую позицию убрать (название/размеры)"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "set_service",
+        "description": "Добавить услугу обработки к заказу (пропитка/антисептик/огнезащита/торцовка/строжка/распил/покраска).",
+        "parameters": {"type": "object", "properties": {
+            "type": {"type": "string", "description": "вид обработки"},
+            "scope": {"type": "string", "description": "объём обработки, напр. «весь объём»"}}, "required": ["type"]}}},
+    {"type": "function", "function": {
+        "name": "set_delivery",
+        "description": "Указать способ получения: самовывоз или доставка + адрес/населённый пункт.",
+        "parameters": {"type": "object", "properties": {
+            "method": {"type": "string", "enum": ["самовывоз", "доставка"]},
+            "address": {"type": "string"}}, "required": ["method"]}}},
+    {"type": "function", "function": {
+        "name": "set_deadline",
+        "description": "Зафиксировать срок, к которому клиенту нужен заказ.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}}, "required": ["text"]}}},
+]
+
+
+def execute(order: dict[str, Any], name: str, args: dict[str, Any]) -> str:
+    """Выполнить вызов функции от модели, вернуть короткий результат-строку."""
+    try:
+        if name == "add_or_update_item":
+            return add_or_update_item(order, args.get("query", ""), args.get("qty"), args.get("target_m3"))
+        if name == "remove_item":
+            return remove_item(order, args.get("query", ""))
+        if name == "set_service":
+            return set_service(order, args.get("type", ""), args.get("scope"))
+        if name == "set_delivery":
+            return set_delivery(order, args.get("method", ""), args.get("address"))
+        if name == "set_deadline":
+            return set_deadline(order, args.get("text", ""))
+    except Exception as e:  # noqa
+        return f"ERROR: {e}"
+    return f"UNKNOWN_TOOL: {name}"

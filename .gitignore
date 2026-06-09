@@ -1,0 +1,25 @@
+# секреты
+.env
+
+# окружение
+venv/
+__pycache__/
+*.pyc
+
+# данные и журналы (не в код)
+*.db
+*.db.bak-*
+*.log
+leads.jsonl
+dialogs.jsonl
+handoffs.json
+liveliness_result.txt
+
+# медиа/тяжёлое
+*.wav
+*.mp3
+*.oga
+*.ogg
+
+# присланные исходники/тестовые данные
+incoming/
