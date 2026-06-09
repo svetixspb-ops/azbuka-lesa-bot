@@ -10,11 +10,14 @@
   GET  /health                    → состояние + дата каталога
   POST /chat   {session_id, text} → {reply, chips, lead}
   POST /reset  {session_id}       → {ok: true}
+  POST /stt    (audio body)       → {text}   ← голосовой ввод с телефона
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 from aiohttp import web
@@ -25,6 +28,7 @@ WEB = ROOT / "web"
 load_dotenv(ROOT / ".env")
 
 import catalog  # noqa: E402
+import speechkit  # noqa: E402
 import tyos_brain  # noqa: E402
 import tyos_handoff  # noqa: E402
 
@@ -76,6 +80,49 @@ async def handle_chat(request: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+# Лимит на загружаемое аудио: голосовой ввод короткий, защита от больших тел.
+_STT_MAX_BYTES = 5 * 1024 * 1024  # 5 МБ ≈ заметно больше минуты речи
+
+
+async def _to_oggopus(raw: bytes) -> bytes:
+    """Привести запись браузера (webm/opus у Android, mp4/aac у iOS Safari) к
+    OGG/Opus mono — формату, который ест Yandex STT v1. Через ffmpeg, автоопределение входа."""
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "in.bin")
+        dst = os.path.join(d, "out.ogg")
+        with open(src, "wb") as f:
+            f.write(raw)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", src, "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-f", "ogg", dst,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(dst):
+            raise RuntimeError(f"ffmpeg failed: {err.decode('utf-8', 'replace')[:300]}")
+        with open(dst, "rb") as f:
+            return f.read()
+
+
+async def handle_stt(request: web.Request) -> web.Response:
+    """Голосовой ввод: аудио из браузера → текст. Текст потом уходит в обычный /chat.
+
+    Тело запроса — сырое аудио (любой контейнер, что отдал MediaRecorder).
+    Распознавание — тот же Yandex STT, что у голосовой Веры."""
+    raw = await request.read()
+    if not raw:
+        raise web.HTTPBadRequest(text='{"error":"empty audio"}', content_type="application/json")
+    if len(raw) > _STT_MAX_BYTES:
+        raise web.HTTPRequestEntityTooLarge(max_size=_STT_MAX_BYTES, actual_size=len(raw))
+    try:
+        ogg = await _to_oggopus(raw)
+        text = (await speechkit.stt(ogg)).strip()
+    except Exception as e:
+        log.exception("stt failed: %s", e)
+        return web.json_response({"error": "stt_failed", "detail": str(e)}, status=502)
+    return web.json_response({"text": text})
+
+
 async def handle_reset(request: web.Request) -> web.Response:
     try:
         data = await request.json()
@@ -102,6 +149,7 @@ def build_app() -> web.Application:
     app.router.add_get("/", handle_index)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/chat", handle_chat)
+    app.router.add_post("/stt", handle_stt)
     app.router.add_post("/reset", handle_reset)
     app.router.add_get("/handoff/{token}", handle_handoff)
     if WEB.exists():
