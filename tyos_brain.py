@@ -89,15 +89,28 @@ _SERVICE_MAP = (("пропитк", "пропитка"), ("антисепт", "а
                 ("покрас", "покраска"))
 
 
-# Отказ/«подумаю» — уважаем, не дожимаем (запрет из продающих навыков).
-_REFUSAL_KW = ("нет, спасибо", "нет спасибо", "я подумаю", "подумаю", "не сейчас",
-               "пока не готов", "пока думаю", "спасибо, не надо", "не надо пока",
-               "ещё подумаю", "позже")
+# Жёсткий отказ — уважаем сразу, не дожимаем (запрет из продающих навыков).
+_HARD_REFUSAL_KW = ("нет, спасибо", "нет спасибо", "спасибо, не надо", "не надо пока",
+                    "пока не готов", "не интересно", "отказываюсь")
+# Мягкое сомнение — повод для ОДНОГО хода ценностью (рычаг №2), не для дропа.
+_SOFT_OBJECTION_KW = ("дорого", "дорогова", "дороговато", "много выходит", "многовато",
+                      "накладно", "это много", "дороже", "подумаю", "надо подумать",
+                      "ещё подумаю", "не сейчас", "пока думаю", "позже", "пока подожду")
+
+
+def _is_hard_refusal(text: str) -> bool:
+    low = text.lower().strip()
+    return any(k in low for k in _HARD_REFUSAL_KW)
+
+
+def _is_soft_objection(text: str) -> bool:
+    low = text.lower().strip()
+    return any(k in low for k in _SOFT_OBJECTION_KW)
 
 
 def _is_refusal(text: str) -> bool:
-    low = text.lower().strip()
-    return any(k in low for k in _REFUSAL_KW)
+    # обратная совместимость: «жёсткий отказ» = старое поведение дропа
+    return _is_hard_refusal(text)
 
 
 _DELIVERY_PLACE_RE = re.compile(
@@ -488,11 +501,18 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
         handoff = True
     if not handoff and _order_intent(text) and not _has_phone(text) and order["items"]:
         handoff = True
-    # Отказ/«подумаю» — уважаем: не дожимаем, не показываем кнопки.
-    if _is_refusal(text):
+    # Рычаг №2 — работа с сомнением. Мягкое «дорого/подумаю» в ПЕРВЫЙ раз: НЕ дропаем,
+    # даём модели сделать ход ценностью (правило 16б в промте). Жёсткое «нет» ИЛИ
+    # повторное сомнение после уже сделанного хода — уважаем, дропаем без дожима.
+    soft = _is_soft_objection(text) and order["items"]
+    hard = _is_hard_refusal(text)
+    if soft and not hard and not session.get("objection_handled"):
+        session["objection_handled"] = True
+        handoff = False  # кнопки не показываем — сейчас ход ценностью, не закрытие
+    elif hard or soft:
         handoff = False
         lv = visible.lower()
-        if "как удобнее продолжить" in lv or ("сохран" in lv and "расчёт" in lv):
+        if "как удобнее продолжить" in lv or ("сохран" in lv and "расчёт" in lv) or "забронир" in lv:
             visible = ("Хорошо, не тороплю. Расчёт будет у меня — обращайтесь, "
                        "когда будете готовы, помогу с заказом и заявкой.")
     # Страховка (правило 24): не предлагаем «сохранить расчёт», если заказ пуст —
