@@ -209,6 +209,8 @@ const TyosWidget = (() => {
   }
 
   function send(){
+    // во время записи «отправить» = закончить запись и отправить (логика «я договорила»)
+    if(recording){ stopRec(); return; }
     const inp = document.getElementById("chatinput");
     const t = inp.value; inp.value = "";
     sendText(t);

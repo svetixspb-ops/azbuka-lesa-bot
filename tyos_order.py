@@ -32,13 +32,21 @@ def new_order() -> dict[str, Any]:
 
 
 def _recompute(order: dict[str, Any]) -> None:
+    # line_total считается pack-aware в add_or_update_item (через catalog.compute_total),
+    # здесь только суммируем — НЕ пересчитываем unit_price×qty (это давало ×pack для упаковок).
     sub = 0
     for it in order["items"].values():
-        it["line_total"] = int(it["unit_price"]) * int(it["qty"])
-        sub += it["line_total"]
+        sub += int(it["line_total"])
     order["subtotal_materials"] = sub
     # услуги пока без известных цен → в сумму не входят, идут строкой с пометкой
     order["total_estimate"] = sub
+
+
+def _line_calc(it: dict[str, Any]) -> str:
+    """Человекочитаемая выкладка по позиции (pack-aware). Берём готовую из compute_total."""
+    if it.get("how"):
+        return it["how"]
+    return f"{it['qty']} шт × {it['unit_price']} ₽ = {it['line_total']:,} ₽".replace(",", " ")
 
 
 def _find_product(query: str, thickness=None, width=None, length=None,
@@ -52,28 +60,32 @@ def _find_product(query: str, thickness=None, width=None, length=None,
 
 
 def add_or_update_item(order: dict[str, Any], query: str, qty: float | None = None,
-                       target_m3: float | None = None) -> str:
-    """Добавить/обновить позицию. qty — штук, либо target_m3 — нужный объём."""
+                       target_m3: float | None = None, packs: float | None = None) -> str:
+    """Добавить/обновить позицию. Количество: qty — штук, packs — упаковок,
+    target_m3 — нужный объём. Для товаров с упаковкой (pack_count) цена в каталоге
+    указана ЗА УПАКОВКУ — расчёт делает catalog.compute_total (pack-aware),
+    поэтому неважно, в штуках или упаковках задал клиент, ×pack не задвоится."""
     p = _find_product(query)
     if not p:
         return f"NOT_FOUND: «{query}» — в каталоге не нашёл, предложи аналог или изготовление."
     v1 = catalog.piece_volume_m3(p.get("thickness_mm"), p.get("width_mm"),
                                  p.get("length_mm"), p.get("diameter_mm"))
-    if qty is None and target_m3 is not None and v1:
-        qty = math.ceil(float(target_m3) / v1)
-    if qty is None:
-        return f"NEED_QTY: для «{p['name']}» уточни количество (штук или объём)."
+    # единый детерминированный расчёт (учитывает упаковки и цену за упаковку)
+    res = catalog.compute_total(p, {"quantity_pieces": qty, "packs": packs, "target_m3": target_m3})
+    if res is None:
+        return f"NEED_QTY: для «{p['name']}» уточни количество (штук, упаковок или объём)."
     key = p["name"]
     order["items"][key] = {
-        "name": p["name"], "unit_price": int(p["price"]), "qty": int(qty),
-        "line_total": int(p["price"]) * int(qty),
+        "name": p["name"], "unit_price": int(res["price"]),
+        "n": int(res["n"]), "unit": res["unit"], "pack": res["pack"],
+        "pieces": int(res["pieces"]), "qty": int(res["pieces"]),
+        "line_total": int(res["total"]), "how": res["how"],
         "volume_m3_each": round(v1, 4) if v1 else None, "stock": p.get("count"),
         "length_m": (p.get("length_mm") or 0) / 1000 or None,
     }
     _recompute(order)
-    short = "по объёму" if (target_m3 and qty) else ""
-    return (f"OK: {p['name']} — {int(qty)} шт × {int(p['price'])} ₽ = "
-            f"{order['items'][key]['line_total']:,} ₽ {short}".replace(",", " ").strip())
+    short = "по объёму" if (target_m3 and not qty and not packs) else ""
+    return f"OK: {p['name']} — {res['how']} {short}".strip()
 
 
 def remove_item(order: dict[str, Any], query: str) -> str:
@@ -113,7 +125,7 @@ def render_state(order: dict[str, Any]) -> str:
         return "ЗАКАЗ ПУСТ."
     lines = ["ТЕКУЩИЙ ЗАКАЗ (числа точные, считает код — озвучивай их, не пересчитывай):"]
     for it in order["items"].values():
-        s = f"— {it['name']}: {it['qty']} шт × {it['unit_price']} ₽ = {it['line_total']:,} ₽".replace(",", " ")
+        s = "— " + it["name"] + ": " + _line_calc(it)
         if it.get("stock") is not None:
             s += f" (в наличии {it['stock']})"
         lines.append(s)
@@ -121,7 +133,8 @@ def render_state(order: dict[str, Any]) -> str:
         lines.append(f"— услуга: {sv['type']}{' (' + sv['scope'] + ')' if sv.get('scope') else ''} — стоимость рассчитает менеджер")
     if order.get("delivery"):
         d = order["delivery"]
-        lines.append(f"— получение: {d['method']}{', ' + d['address'] if d.get('address') else ''}")
+        lines.append(f"— получение: {d['method']}{', ' + d['address'] if d.get('address') else ''}"
+                     + (f" — {d['note']}" if d.get("note") else ""))
     if order.get("deadline"):
         lines.append(f"— срок: {order['deadline']}")
     lines.append(f"ИТОГО предварительно: {order['total_estimate']:,} ₽ (точную подтвердит менеджер)".replace(",", " "))
@@ -134,7 +147,7 @@ def render_summary(order: dict[str, Any]) -> str:
         return "Готов сохранить ваш расчёт. Как удобнее продолжить?"
     lines = ["Фиксирую заказ:"]
     for it in order["items"].values():
-        lines.append(f"• {it['name']} — {it['qty']} шт × {it['unit_price']} ₽ = {it['line_total']:,} ₽".replace(",", " "))
+        lines.append(f"• {it['name']} — " + _line_calc(it))
     for sv in order["services"]:
         lines.append(f"• обработка: {sv['type']}{' (' + sv['scope'] + ')' if sv.get('scope') else ''} — стоимость рассчитает менеджер")
     if order.get("delivery"):
@@ -161,10 +174,11 @@ def to_packet(order: dict[str, Any], contact: dict[str, Any] | None = None,
     """Собрать пакет заявки из заказа (для менеджера / хэндоффа в MAX)."""
     positions = []
     for it in order["items"].values():
+        qty_str = (f"{it['n']} уп ({it['pieces']} шт)" if it.get("pack") else f"{it['qty']} шт")
         positions.append({
-            "name": it["name"], "price": it["unit_price"], "qty": f"{it['qty']} шт",
+            "name": it["name"], "price": it["unit_price"], "qty": qty_str,
             "sum": it["line_total"],
-            "how": f"{it['qty']} шт × {it['unit_price']} = {it['line_total']:,} ₽".replace(",", " "),
+            "how": _line_calc(it),
         })
     d = order.get("delivery") or {}
     delivery_str = None
@@ -192,10 +206,11 @@ def to_packet(order: dict[str, Any], contact: dict[str, Any] | None = None,
 TOOLS = [
     {"type": "function", "function": {
         "name": "add_or_update_item",
-        "description": "Добавить позицию в заказ или изменить её количество. Передай описание товара (тип+размеры) и количество в штуках (qty) ИЛИ нужный объём в кубометрах (target_m3). Если клиент задал количество оптом для нескольких ранее названных позиций («по 100», «тоже по 100») — вызови функцию для КАЖДОЙ позиции отдельно.",
+        "description": "Добавить позицию в заказ или изменить её количество. Передай описание товара (тип+размеры) и количество ОДНИМ из способов: qty — штук, packs — упаковок, target_m3 — нужный объём в м³. ВАЖНО: НЕ перемножай сам — сумму считает код. Для товаров в упаковках цена в каталоге за упаковку; если клиент сказал «N упаковок» — передай packs=N (а не qty), если «N штук» — qty=N, код сам разберётся. Если клиент задал количество оптом для нескольких ранее названных позиций («по 100», «тоже по 100») — вызови функцию для КАЖДОЙ позиции отдельно.",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "товар с размерами, напр. «брус сухой строганный 20х45х3000» или «террасная доска лиственница 28х145х6000 палубная»"},
             "qty": {"type": "integer", "description": "количество штук"},
+            "packs": {"type": "integer", "description": "количество упаковок (для товаров, продающихся упаковками)"},
             "target_m3": {"type": "number", "description": "нужный объём в м³ (если задан кубами)"},
         }, "required": ["query"]}}},
     {"type": "function", "function": {
@@ -227,7 +242,8 @@ def execute(order: dict[str, Any], name: str, args: dict[str, Any]) -> str:
     """Выполнить вызов функции от модели, вернуть короткий результат-строку."""
     try:
         if name == "add_or_update_item":
-            return add_or_update_item(order, args.get("query", ""), args.get("qty"), args.get("target_m3"))
+            return add_or_update_item(order, args.get("query", ""), args.get("qty"),
+                                      args.get("target_m3"), args.get("packs"))
         if name == "remove_item":
             return remove_item(order, args.get("query", ""))
         if name == "set_service":

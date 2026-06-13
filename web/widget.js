@@ -192,7 +192,11 @@
         clearTimeout(to); busy = false; $("tyosSnd").disabled = false; inputEl.focus();
       });
     }
-    function send() { var t = inputEl.value; inputEl.value = ""; sendText(t); }
+    function send() {
+      // во время записи «отправить» = закончить запись и отправить (логика «я договорила»)
+      if (recording) { stopRec(); return; }
+      var t = inputEl.value; inputEl.value = ""; sendText(t);
+    }
 
     // --- голос (только сенсорные устройства + secure context) ---
     function micSupported() {
