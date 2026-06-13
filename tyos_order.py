@@ -159,7 +159,10 @@ def render_summary(order: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"Итого предварительно: {order['total_estimate']:,} ₽".replace(",", " ")
                  + " — точную сумму и стоимость обработки подтвердит менеджер.")
-    lines.append("Как удобнее продолжить?")
+    lines.append("")
+    lines.append("Забронирую материал за вами на 2–3 дня по текущему наличию — "
+                 "менеджер подтвердит бронь и поможет с доставкой. "
+                 "Оставите телефон или продолжим в MAX?")
     return "\n".join(lines)
 
 

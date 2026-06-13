@@ -113,7 +113,8 @@ def _coerce_num(v: Any) -> float | int | None:
 
 
 async def chat_tools(messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-                     *, temperature: float = 0.3, max_tokens: int = 700) -> dict[str, Any]:
+                     *, temperature: float = 0.3, max_tokens: int = 700,
+                     tool_choice: Any = "auto") -> dict[str, Any]:
     """Chat-completion с function-calling (DeepSeek, OpenAI-совместимый формат).
 
     Возвращает СООБЩЕНИЕ ассистента целиком: {"role", "content", "tool_calls"?}.
@@ -128,7 +129,7 @@ async def chat_tools(messages: list[dict[str, Any]], tools: list[dict[str, Any]]
         "temperature": temperature,
         "max_tokens": max_tokens,
         "tools": tools,
-        "tool_choice": "auto",
+        "tool_choice": tool_choice,
     }
     last_exc: Exception | None = None
     for attempt in range(_RETRY_ATTEMPTS):

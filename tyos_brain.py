@@ -342,11 +342,17 @@ def _parse_lead(reply: str) -> tuple[str, dict[str, Any] | None]:
     return visible, contact
 
 
-async def _run_tools(messages: list[dict[str, Any]], order: dict[str, Any]) -> str:
+async def _run_tools(messages: list[dict[str, Any]], order: dict[str, Any],
+                     force_first_tool: str | None = None) -> str:
     """Цикл function-calling: модель правит заказ через функции, код считает.
-    Возвращает финальный текст ответа (после всех вызовов функций)."""
-    for _ in range(5):  # максимум раундов вызовов
-        msg = await llm.chat_tools(messages, tyos_order.TOOLS)
+    Возвращает финальный текст ответа (после всех вызовов функций).
+    force_first_tool — имя функции, которую модель ОБЯЗАНА вызвать на первом раунде
+    (страховка: расчёт был, но позиция не занеслась в заказ)."""
+    for i in range(5):  # максимум раундов вызовов
+        choice: Any = "auto"
+        if i == 0 and force_first_tool:
+            choice = {"type": "function", "function": {"name": force_first_tool}}
+        msg = await llm.chat_tools(messages, tyos_order.TOOLS, tool_choice=choice)
         tcs = msg.get("tool_calls")
         if not tcs:
             return (msg.get("content") or "").strip()
@@ -359,6 +365,13 @@ async def _run_tools(messages: list[dict[str, Any]], order: dict[str, Any]) -> s
                 args = {}
             result = tyos_order.execute(order, fn.get("name", ""), args)
             messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": result})
+        # если задана доставка — посчитать её по тарифу ДО показа снимка,
+        # чтобы модель озвучила сумму, а не «уточнит менеджер»
+        if order.get("delivery"):
+            try:
+                await asyncio.wait_for(_resolve_delivery_cost(order), timeout=9)
+            except (Exception, asyncio.TimeoutError):
+                pass
         # после правок показываем модели актуальный заказ, чтобы озвучила точные числа
         messages.append({"role": "system", "content": tyos_order.render_state(order)})
     return ""  # упёрлись в лимит раундов — отдадим пусто, обработается фолбэком
@@ -391,6 +404,23 @@ async def _resolve_delivery_cost(order: dict[str, Any]) -> None:
         d["note"] = "стоимость уточнит менеджер"
 
 
+_CALC_KW = ("посчита", "рассчита", "расчита", "сколько буд", "сколько выйд", "сколько сто",
+            "упаков", "штук", " шт", "куб", "м3", "м³", "погонаж")
+
+
+def _calc_intent(text: str) -> bool:
+    """Реплика похожа на запрос расчёта позиции (есть число + признак товара/количества).
+    Используется как условие страховки-форса add_or_update_item при пустом заказе."""
+    low = text.lower()
+    has_digit = any(c.isdigit() for c in low)
+    if not has_digit:
+        return False
+    if any(k in low for k in _CALC_KW):
+        return True
+    # размер вида 100x150 / 50х150х6000
+    return bool(re.search(r"\d+\s*[xх]\s*\d+", low))
+
+
 async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     session = _session(session_id)
     history: list[dict[str, Any]] = session["history"]
@@ -408,6 +438,16 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     )
     try:
         raw = await asyncio.wait_for(_run_tools(messages, order), timeout=_CHAT_TIMEOUT + 8)
+        # Страховка позиций: был явный расчёт (размеры/количество), но модель не занесла
+        # позицию в заказ → форсируем вызов add_or_update_item, чтобы заказ не остался
+        # пустым (иначе бронь/заявку нечем закрыть). Текст первого ответа сохраняем —
+        # он уже содержит верные числа из ДАННЫХ; форс делаем на копии сообщений.
+        if not order["items"] and _calc_intent(text):
+            forced = await asyncio.wait_for(
+                _run_tools(list(messages), order, force_first_tool="add_or_update_item"),
+                timeout=_CHAT_TIMEOUT + 8)
+            if not raw:
+                raw = forced
     except (Exception, asyncio.TimeoutError) as e:
         log.warning("run_tools failed/timeout: %s", e)
         history.pop()  # не сохраняем повисшую реплику
@@ -443,7 +483,8 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     visible = visible.replace("<<HANDOFF>>", "").strip()
     low_v = visible.lower()
     if not handoff and ("как удобнее продолжить" in low_v
-                        or ("сохранить" in low_v and "расчёт" in low_v and "?" in visible)):
+                        or ("сохранить" in low_v and "расчёт" in low_v and "?" in visible)
+                        or ("забронир" in low_v and "?" in visible)):
         handoff = True
     if not handoff and _order_intent(text) and not _has_phone(text) and order["items"]:
         handoff = True
@@ -475,9 +516,9 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
             max_url = (MAX_BOT_LINK + ("&" if "?" in MAX_BOT_LINK else "?")
                        + "start=" + token) if MAX_BOT_LINK else ""
             actions = [
-                {"type": "max", "label": "💾 Сохранить расчёт и продолжить в MAX",
+                {"type": "max", "label": "💾 Забронировать и продолжить в MAX",
                  "url": max_url, "token": token},
-                {"type": "phone", "label": "📞 Оставить телефон"},
+                {"type": "phone", "label": "📞 Забронировать — оставить телефон"},
             ]
 
     # Markdown больше НЕ вырезаем — виджет рендерит **жирный** (формат-карточки).
