@@ -184,7 +184,15 @@ _SESSIONS: dict[str, dict[str, Any]] = {}
 def _session(session_id: str) -> dict[str, Any]:
     s = _SESSIONS.get(session_id)
     if s is None:
-        s = {"history": [], "items": [], "order": tyos_order.new_order()}
+        # Добавляем GREETING в историю как первое сообщение ассистента.
+        # Фронтенд показывает его сам — мозг должен «помнить», что уже поздоровался,
+        # иначе при первом user-сообщении модель представляется повторно.
+        from tyos_prompts import GREETING
+        s = {
+            "history": [{"role": "assistant", "content": GREETING}],
+            "items": [],
+            "order": tyos_order.new_order(),
+        }
         _SESSIONS[session_id] = s
     return s
 
