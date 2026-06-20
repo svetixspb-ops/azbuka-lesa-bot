@@ -131,15 +131,82 @@ async def _notify_manager(text: str) -> None:
 
 # --- Адаптация ответа для MAX (без markdown) ---
 
+_MAX_STRIP_PHRASES = [
+    ("Оставите телефон или продолжим в MAX?", "Напишите ваш телефон — забронирую."),
+    ("или продолжим в MAX?", ""),
+    ("можем продолжить в MAX", ""),
+    ("продолжим в MAX", ""),
+    ("продолжить в MAX", ""),
+    ("Если удобнее — можем продолжить в MAX", ""),
+    (" в MAX.", "."),
+    (" в MAX,", ","),
+    (" в MAX ", " "),
+    ("через MAX", ""),
+]
+
 def _strip_md(text: str) -> str:
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
     text = re.sub(r'#+\s+', '', text)
-    # Заменить «или продолжим в MAX?» — в MAX уже находимся
-    text = text.replace("Оставите телефон или продолжим в MAX?",
-                        "Напишите ваш телефон — забронирую.")
-    text = text.replace("или продолжим в MAX?", "")
+    for old, new in _MAX_STRIP_PHRASES:
+        text = text.replace(old, new)
+    # Чистим двойные пробелы и точки после замен
+    text = re.sub(r'  +', ' ', text)
+    text = re.sub(r'\. \.', '.', text)
     return text.strip()
+
+
+# --- Детект «контакт через MAX» (пользователь уже в MAX, телефон не нужен) ---
+
+_MAX_CONTACT_SIGNALS = (
+    "в мах", "в max", "по этому номеру", "напишите сюда", "напишите мне здесь",
+    "свяжитесь здесь", "свяжитесь в max", "свяжитесь в мах",
+    "пусть свяжется", "напишите в max", "напишите в мах",
+    "связаться здесь", "связаться в max",
+)
+
+
+def _is_max_contact_signal(text: str) -> bool:
+    low = text.lower()
+    return any(sig in low for sig in _MAX_CONTACT_SIGNALS)
+
+
+async def _deliver_max_lead(uid: int, session_id: str) -> bool:
+    """Доставить заявку с MAX-контактом (без телефона — пользователь в MAX)."""
+    import tyos_order as _ord
+    import tyos_lead as _lead
+    session = tyos_brain._session(session_id)
+    order = session.get("order", {})
+    if not order.get("items"):
+        return False
+    packet = _ord.to_packet(
+        order,
+        contact={"contact": f"MAX-аккаунт (id {uid})", "name": None,
+                 "preferred_time": None, "delivery": None, "note": None},
+        session_id=session_id,
+    )
+    status = await _lead.deliver(packet)
+    log.info("MAX-contact lead: user=%s status=%s", uid, status)
+    return True
+
+
+async def _notify_hot_order(uid: int, session_id: str) -> None:
+    """Уведомить менеджера о горячем расчёте без контакта (MAX user_id известен)."""
+    import tyos_order as _ord
+    from tyos_lead import render_for_manager
+    session = tyos_brain._session(session_id)
+    order = session.get("order", {})
+    if not order.get("items"):
+        return
+    packet = _ord.to_packet(order, contact=None, session_id=session_id)
+    summary = render_for_manager(packet)
+    text = (
+        f"Горячий расчёт — контакт не оставил\n"
+        f"MAX user_id: {uid}\n\n"
+        f"{summary}\n\n"
+        f"Можно написать клиенту в MAX напрямую по его id."
+    )
+    await _notify_manager(text)
 
 
 # --- Бот ---
@@ -246,7 +313,23 @@ async def on_message(event: MessageCreated):
         return
 
     reply = _strip_md(result["reply"])
+
+    # Если пользователь сигнализировал «свяжитесь в MAX» — доставить лид и закрыть
+    if _is_max_contact_signal(text) and not result.get("lead"):
+        delivered = await _deliver_max_lead(uid, session_id)
+        if delivered:
+            await bot.send_message(
+                user_id=uid,
+                text="Передал менеджеру — напишет вам здесь в MAX в ближайшее время. 🌿"
+            )
+            return
+
     await bot.send_message(user_id=uid, text=reply)
+
+    # Горячий расчёт: бот дошёл до финального снимка заказа (actions есть),
+    # но клиент ещё не оставил контакт → уведомить менеджера с MAX user_id
+    if result.get("actions") and not result.get("lead"):
+        await _notify_hot_order(uid, session_id)
 
     if result.get("lead"):
         log.info("lead delivered via MAX chat: user=%s status=%s", uid, result["lead"])
