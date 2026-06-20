@@ -18,15 +18,18 @@ import asyncio
 import logging
 from pathlib import Path
 
+# load_dotenv MUST run before tyos_brain/llm imports — they read env vars at module level
 from dotenv import load_dotenv
+_BASE_EARLY = Path(__file__).parent
+load_dotenv(_BASE_EARLY / ".env")
+
 from maxapi import Bot, Dispatcher
 from maxapi.types import MessageCreated, BotStarted
 
 import tyos_brain
 from tyos_prompts import GREETING
 
-BASE = Path(__file__).parent
-load_dotenv(BASE / ".env")
+BASE = _BASE_EARLY
 
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "").strip()
 HANDOFF_STORE = BASE / "handoffs.json"
