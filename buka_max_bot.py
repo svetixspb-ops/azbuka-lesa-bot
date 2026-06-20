@@ -16,6 +16,7 @@ import re
 import json
 import asyncio
 import logging
+import tempfile
 from pathlib import Path
 
 # load_dotenv MUST run before tyos_brain/llm imports — they read env vars at module level
@@ -23,9 +24,12 @@ from dotenv import load_dotenv
 _BASE_EARLY = Path(__file__).parent
 load_dotenv(_BASE_EARLY / ".env")
 
+import aiohttp
 from maxapi import Bot, Dispatcher
 from maxapi.types import MessageCreated, BotStarted
+from maxapi.types.attachments import Audio as MaxAudio
 
+import speechkit
 import tyos_brain
 from tyos_prompts import GREETING
 
@@ -127,6 +131,47 @@ async def _notify_manager(text: str) -> None:
         await nb.close_session()
     except Exception as e:
         log.warning("notify manager failed: %s", e)
+
+
+# --- Голосовой ввод: аудио из MAX → Yandex STT ---
+
+async def _to_oggopus(raw: bytes) -> bytes:
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "in.bin")
+        dst = os.path.join(d, "out.ogg")
+        with open(src, "wb") as f:
+            f.write(raw)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", src, "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-f", "ogg", dst,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(dst):
+            raise RuntimeError(f"ffmpeg: {err.decode('utf-8', 'replace')[:200]}")
+        with open(dst, "rb") as f:
+            return f.read()
+
+
+async def _stt_from_url(url: str) -> str | None:
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                raw = await r.read()
+        ogg = await _to_oggopus(raw)
+        text = (await speechkit.stt(ogg)).strip()
+        return text or None
+    except Exception as e:
+        log.warning("MAX voice STT failed: %s", e)
+        return None
+
+
+def _extract_audio(event: MessageCreated) -> MaxAudio | None:
+    atts = (event.message.body.attachments or [])
+    for a in atts:
+        if isinstance(a, MaxAudio):
+            return a
+    return None
 
 
 # --- Адаптация ответа для MAX (без markdown) ---
@@ -247,8 +292,18 @@ async def on_start(event: BotStarted):
 async def on_message(event: MessageCreated):
     uid = event.from_user.user_id
     text = (event.message.body.text or "").strip()
+
+    # Голосовое сообщение
     if not text:
-        return
+        audio = _extract_audio(event)
+        if audio:
+            # Сначала проверяем, не транскрибировал ли MAX сам
+            if audio.transcription:
+                text = audio.transcription.strip()
+            elif audio.payload and getattr(audio.payload, "url", None):
+                text = await _stt_from_url(audio.payload.url) or ""
+        if not text:
+            return
 
     user_state = _get_user_state(uid)
     step = user_state.get("step")
