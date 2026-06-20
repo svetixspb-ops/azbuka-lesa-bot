@@ -86,11 +86,11 @@
       '<span>Подберу материал и посчитаю цену — спросите</span>' +
       '<button class="tx" id="tyosTeaserX" aria-label="Закрыть">✕</button>' +
     '</div>' +
-    '<button class="fab" id="tyosFab">' + ICON_CHAT + ' Бука</button>' +
+    '<button class="fab" id="tyosFab">' + ICON_CHAT + ' Консультант 24/7</button>' +
     '<div class="chatwin" id="tyosWin">' +
       '<div class="chathead">' +
-        '<div class="ava"><img src="' + AVATAR + '" alt="Бука"></div>' +
-        '<div><b>Бука</b><small>ИИ-консультант · отвечает за пару секунд</small></div>' +
+        '<div class="ava"><img src="' + AVATAR + '" alt="Консультант"></div>' +
+        '<div><b>Консультант 24/7</b><small>ИИ-консультант · отвечает за пару секунд</small></div>' +
         '<button class="x" id="tyosClose">✕</button>' +
       '</div>' +
       '<div class="chatbody" id="tyosBody"></div>' +
