@@ -2,7 +2,7 @@
 <html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/png" href="/static/tyos-avatar.png">
-<title>ИИ-консультант Тёс — тестовая страница · Азбука Леса</title>
+<title>Бука — ИИ-консультант · тестовая страница · Азбука Леса</title>
 <style>
 :root{--paper:#FAF7F1;--paper2:#F1EADD;--ink:#1F1B16;--mute:#6B6258;--line:#E7E0D5;
  --green:#2F5A3A;--green-d:#1E3D27;--wood:#B98B5E;--wood-d:#8A6238;--clay:#C2502F;}
@@ -71,7 +71,7 @@ body.has-mic .chatfoot .mic{display:flex}
 <body>
 <div class="wrap">
  <div class="eyebrow">Тестовая страница · не сайт клиента</div>
- <h1>ИИ-консультант «Тёс»</h1>
+ <h1>ИИ-консультант «Бука»</h1>
  <p class="lead">Это изолированная страница для проверки бота перед встройкой на alyansles.ru. Сайт Азбуки не затронут. Нажмите кнопку справа внизу и поговорите с консультантом.</p>
  <div class="note">
   <b>Что можно проверить:</b>
@@ -85,20 +85,20 @@ body.has-mic .chatfoot .mic{display:flex}
 </div>
 
 <div class="fab-teaser" id="fabTeaser" onclick="TyosWidget.openFromTeaser()">
- <span class="tic"><img src="/static/tyos-avatar.png" alt="Тёс"></span>
+ <span class="tic"><img src="/static/tyos-avatar.png" alt="Бука"></span>
  <span>Подберу материал и посчитаю цену — спросите</span>
  <button class="tx" onclick="event.stopPropagation();TyosWidget.dismissTeaser()" aria-label="Закрыть">✕</button>
 </div>
 
 <button class="fab" id="fab" onclick="TyosWidget.toggle()">
  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 0 1-11.5 7.2L3 21l1.8-6.5A8 8 0 1 1 21 12z"></path></svg>
- Спросить Тёса
+ Спросить Букуа
 </button>
 
 <div class="chatwin" id="chatwin">
  <div class="chathead">
-  <div class="ava"><img src="/static/tyos-avatar.png" alt="Тёс"></div>
-  <div><b>ИИ-консультант</b><small>Тёс · отвечает за пару секунд</small></div>
+  <div class="ava"><img src="/static/tyos-avatar.png" alt="Бука"></div>
+  <div><b>ИИ-консультант</b><small>Бука · отвечает за пару секунд</small></div>
   <button class="x" onclick="TyosWidget.toggle()">✕</button>
  </div>
  <div class="chatbody" id="chatbody"></div>
@@ -116,7 +116,7 @@ body.has-mic .chatfoot .mic{display:flex}
 
 <script>
 const TyosWidget = (() => {
-  const GREETING = "Здравствуйте! Я Тёс, ИИ-консультант «Азбуки Леса». Подберу материал, посчитаю объём и цену. Чем помочь?";
+  const GREETING = "Здравствуйте! Я Бука, ИИ-консультант «Азбуки Леса». Подберу материал, посчитаю объём и цену. Чем помочь?";
   const START_CHIPS = ["Подобрать под задачу", "Знаю, что нужно", "Рассчитать объём", "Доставка и оплата"];
   const sid = "web-" + Math.random().toString(36).slice(2) + "-" + (performance.now()|0);
   let started = false, busy = false;
@@ -174,7 +174,7 @@ const TyosWidget = (() => {
   }
   function typing(on){
     let t = document.getElementById("typing");
-    if(on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.textContent="Тёс печатает…"; body().appendChild(t); scroll(); }
+    if(on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.textContent="Бука печатает…"; body().appendChild(t); scroll(); }
     if(!on && t) t.remove();
   }
 

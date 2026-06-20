@@ -21,7 +21,7 @@
   var STATIC = API + "/static";
   var AVATAR = STATIC + "/tyos-avatar.png";
 
-  var GREETING = "Здравствуйте! Я Тёс, ИИ-консультант «Азбуки Леса». Подберу материал, посчитаю объём и цену. Чем помочь?";
+  var GREETING = "Здравствуйте! Я Бука, ИИ-консультант «Азбуки Леса». Подберу материал, посчитаю объём и цену. Чем помочь?";
   var START_CHIPS = ["Подобрать под задачу", "Знаю, что нужно", "Рассчитать объём", "Доставка и оплата"];
 
   var CSS = `
@@ -82,15 +82,15 @@
 
   var HTML =
     '<div class="fab-teaser" id="tyosTeaser">' +
-      '<span class="tic"><img src="' + AVATAR + '" alt="Тёс"></span>' +
+      '<span class="tic"><img src="' + AVATAR + '" alt="Бука"></span>' +
       '<span>Подберу материал и посчитаю цену — спросите</span>' +
       '<button class="tx" id="tyosTeaserX" aria-label="Закрыть">✕</button>' +
     '</div>' +
-    '<button class="fab" id="tyosFab">' + ICON_CHAT + ' Консультант 24/7</button>' +
+    '<button class="fab" id="tyosFab">' + ICON_CHAT + ' Бука</button>' +
     '<div class="chatwin" id="tyosWin">' +
       '<div class="chathead">' +
-        '<div class="ava"><img src="' + AVATAR + '" alt="Тёс"></div>' +
-        '<div><b>Консультант 24/7</b><small>Тёс · отвечает за пару секунд</small></div>' +
+        '<div class="ava"><img src="' + AVATAR + '" alt="Бука"></div>' +
+        '<div><b>Бука</b><small>ИИ-консультант · отвечает за пару секунд</small></div>' +
         '<button class="x" id="tyosClose">✕</button>' +
       '</div>' +
       '<div class="chatbody" id="tyosBody"></div>' +
@@ -163,7 +163,7 @@
     }
     function typing(on) {
       var t = $("tyosTyping");
-      if (on && !t) { t = document.createElement("div"); t.id = "tyosTyping"; t.className = "typing"; t.textContent = "Тёс печатает…"; bodyEl.appendChild(t); scroll(); }
+      if (on && !t) { t = document.createElement("div"); t.id = "tyosTyping"; t.className = "typing"; t.textContent = "Бука печатает…"; bodyEl.appendChild(t); scroll(); }
       if (!on && t) t.remove();
     }
     function start() {
