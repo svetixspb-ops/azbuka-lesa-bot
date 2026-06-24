@@ -451,11 +451,18 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     data_block = await _build_data_block(text, history, session)
 
     history.append({"role": "user", "content": text})
+    extra_ctx: list[dict[str, Any]] = []
+    if session.get("delivery_asked") and not order.get("delivery"):
+        extra_ctx = [{"role": "system", "content":
+                      "⚠️ ЖДЁМ АДРЕС ДОСТАВКИ: клиент отвечает на вопрос про получение. "
+                      "Прочти его реплику выше и вызови set_delivery(method=..., address=...) "
+                      "прямо сейчас — это обязательный первый вызов функции в этом ответе."}]
     messages = (
         [{"role": "system", "content": _SYSTEM}]
         + history[-_HISTORY_MAX:]
         + [{"role": "system", "content": data_block}]
         + [{"role": "system", "content": tyos_order.render_state(order)}]
+        + extra_ctx
     )
     try:
         raw = await asyncio.wait_for(_run_tools(messages, order), timeout=_CHAT_TIMEOUT + 8)
@@ -489,6 +496,12 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
         method, place = _detect_delivery(text)
         if method:
             tyos_order.set_delivery(order, method, place)
+        elif session.get("delivery_asked") and not _calc_intent(text):
+            # Бот уже спрашивал про доставку, модель не вызвала set_delivery —
+            # берём весь текст как адрес (клиент написал просто «Гатчина», «ул. Свободы 5»).
+            stripped = text.strip(" .,!?")
+            if stripped and 2 < len(stripped) < 120:
+                tyos_order.set_delivery(order, "доставка", stripped)
 
     # Если доставка задана — посчитать её по зоне (как у Веры).
     try:

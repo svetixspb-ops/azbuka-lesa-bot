@@ -111,7 +111,14 @@
     root.innerHTML = HTML;
     document.body.appendChild(root);
 
-    var sid = "web-" + Math.random().toString(36).slice(2) + "-" + ((window.performance ? performance.now() : Date.now()) | 0);
+    // Session persistence across page navigations within the same browser tab.
+    var SKEY = "tyos_sid", MKEY = "tyos_msgs";
+    var sid;
+    try { sid = sessionStorage.getItem(SKEY); } catch (e) {}
+    if (!sid) {
+      sid = "web-" + Math.random().toString(36).slice(2) + "-" + ((window.performance ? performance.now() : Date.now()) | 0);
+      try { sessionStorage.setItem(SKEY, sid); } catch (e) {}
+    }
     var started = false, busy = false;
     var recorder = null, chunks = [], recording = false;
 
@@ -129,6 +136,13 @@
       d.className = "msg " + (who === "out" ? "out" : "in");
       if (who === "out") d.textContent = text; else d.innerHTML = mdToHtml(text);
       bodyEl.appendChild(d); scroll();
+      // Persist to sessionStorage so conversation survives page navigation.
+      try {
+        var msgs = JSON.parse(sessionStorage.getItem(MKEY) || "[]");
+        msgs.push({t: text, w: who});
+        if (msgs.length > 60) msgs = msgs.slice(-60);
+        sessionStorage.setItem(MKEY, JSON.stringify(msgs));
+      } catch (e) {}
     }
     function addChips(list) {
       if (!list || !list.length) return;
@@ -168,7 +182,20 @@
     }
     function start() {
       if (started) return; started = true;
-      addMsg(GREETING, "in"); addChips(START_CHIPS);
+      var saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem(MKEY) || "null"); } catch (e) {}
+      if (saved && saved.length) {
+        // Restore prior conversation from sessionStorage (user navigated away and came back).
+        saved.forEach(function (m) {
+          var d = document.createElement("div");
+          d.className = "msg " + (m.w === "out" ? "out" : "in");
+          if (m.w === "out") d.textContent = m.t; else d.innerHTML = mdToHtml(m.t);
+          bodyEl.appendChild(d);
+        });
+        scroll();
+      } else {
+        addMsg(GREETING, "in"); addChips(START_CHIPS);
+      }
     }
 
     function sendText(text) {
