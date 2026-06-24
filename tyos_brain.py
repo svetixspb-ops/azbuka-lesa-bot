@@ -247,6 +247,8 @@ async def _build_data_block(text: str, history: list[dict[str, Any]],
         calc = catalog.compute_total(best, it)
         if calc:
             line += f" | расчёт: {calc['how']}"
+        if best.get("url"):
+            line += f" | страница товара: {best['url']}"
         lines.append(line)
         _remember_item(session, best, calc)
         # ещё 1–2 альтернативы для подбора
