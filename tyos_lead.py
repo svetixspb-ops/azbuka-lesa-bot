@@ -4,7 +4,9 @@
   1. ВСЕГДА — журнал leads.jsonl + лог. Надёжный путь, работает без настройки.
   2. MAX (если задан MAX_BOT_TOKEN + MAX_LEAD_CHAT_ID) — отправка менеджеру/Свете
      через нашу же библиотеку maxapi. На тест получатель — MAX Светланы.
-  3. Дубль (почта/Битрикс/таблица) — ждём канал от Артёма, заложен как заглушка.
+  3. Telegram (если задан TELEGRAM_BOT_TOKEN + TG_LEAD_CHAT_ID) — дубль менеджеру
+     через @azbukalesa_bot. Менеджер должен один раз нажать /start у бота.
+  4. Дубль (почта/Битрикс/таблица) — ждём канал от Артёма, заложен как заглушка.
 
 Заявка собирается из контакта (от клиента) + позиций и расчётов, которые Бука
 накопил за диалог (их кладёт brain в session). Цифры — из catalog.compute_total,
@@ -136,10 +138,39 @@ async def _send_max(text: str) -> bool:
         return False
 
 
+async def _send_telegram(text: str) -> bool:
+    """Telegram-sink. Включается, только если заданы TELEGRAM_BOT_TOKEN и TG_LEAD_CHAT_ID.
+
+    Получатель должен один раз написать боту /start (Telegram не даёт ботам
+    писать первым). Отправка чистым HTTPS, без aiogram.
+    """
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TG_LEAD_CHAT_ID") or "").strip()
+    if not (token and chat_id):
+        return False
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                data = await r.json()
+        if not data.get("ok"):
+            log.error("TG send failed: %s", data)
+            return False
+        return True
+    except Exception as e:
+        log.exception("TG send failed: %s", e)
+        return False
+
+
 async def deliver(lead: dict[str, Any]) -> dict[str, Any]:
     """Доставить заявку во все доступные каналы. Возвращает статус по каналам."""
     text = render_for_manager(lead)
     _persist(lead)
     log.info("LEAD:\n%s", text)
     max_ok = await _send_max(text)
-    return {"persisted": True, "max": max_ok, "logged": True}
+    tg_ok = await _send_telegram(text)
+    return {"persisted": True, "max": max_ok, "telegram": tg_ok, "logged": True}
