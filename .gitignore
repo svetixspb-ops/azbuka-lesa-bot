@@ -16,6 +16,7 @@ handoffs.json
 liveliness_result.txt
 buka_max_state.json
 buka_vk_state.json
+dialogs_export_*.txt
 
 # медиа/тяжёлое
 *.wav
