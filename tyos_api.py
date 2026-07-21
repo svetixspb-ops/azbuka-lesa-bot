@@ -37,6 +37,35 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("tyos-api")
 
 TYOS_PORT = int(os.environ.get("TYOS_PORT", "8091"))
+# слушаем только localhost: наружу нас отдаёт nginx (tyos-https), прямой bind на 0.0.0.0 был лишним
+TYOS_HOST = os.environ.get("TYOS_HOST", "127.0.0.1")
+
+# --- rate-limit: /chat и /stt дёргают платные API (LLM/STT), без лимита возможна накрутка ---
+import time
+from collections import defaultdict, deque
+
+RATE_LIMIT = 20      # запросов на IP
+RATE_WINDOW = 60.0   # за столько секунд
+_hits: dict[str, deque] = defaultdict(deque)
+
+
+@web.middleware
+async def rate_limit_mw(request: web.Request, handler):
+    if request.method == "POST" and request.path in ("/chat", "/stt"):
+        # X-Real-IP ставит nginx; после bind на localhost другим путём сюда не попасть
+        ip = request.headers.get("X-Real-IP") or (request.remote or "?")
+        now = time.monotonic()
+        q = _hits[ip]
+        while q and now - q[0] > RATE_WINDOW:
+            q.popleft()
+        if len(q) >= RATE_LIMIT:
+            log.warning("rate limit exceeded ip=%s path=%s", ip, request.path)
+            return web.json_response({"error": "too_many_requests"}, status=429)
+        q.append(now)
+        if len(_hits) > 10000:  # эвикция пустых очередей, чтобы память не росла
+            for k in [k for k, v in list(_hits.items()) if not v]:
+                _hits.pop(k, None)
+    return await handler(request)
 
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -145,7 +174,7 @@ async def handle_handoff(request: web.Request) -> web.Response:
 
 
 def build_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[rate_limit_mw])
     app.router.add_get("/", handle_index)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/chat", handle_chat)
@@ -159,4 +188,4 @@ def build_app() -> web.Application:
 
 if __name__ == "__main__":
     log.info("Tyos API on :%s, catalog=%s", TYOS_PORT, catalog.get_yml_date())
-    web.run_app(build_app(), host="0.0.0.0", port=TYOS_PORT, access_log=None)
+    web.run_app(build_app(), host=TYOS_HOST, port=TYOS_PORT, access_log=None)

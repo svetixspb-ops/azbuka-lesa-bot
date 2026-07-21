@@ -57,7 +57,7 @@ def _log_turn(session_id: str, role: str, content: str) -> None:
 
 _SYSTEM = build_system_prompt()
 _HISTORY_MAX = 16  # реплик (user+assistant) храним в контексте
-_LEAD_RE = re.compile(r"<<LEAD>>\s*(\{.*\})\s*$", re.DOTALL)
+_LEAD_RE = re.compile(r"<<LEAD>>\s*(\{[^{}]*\})", re.DOTALL)
 
 # Сопутствующие товары — ищем в каталоге, если клиент упомянул их в реплике
 # (базовые формы, search_loose сам стеммит под падежи).
@@ -354,7 +354,7 @@ def _parse_lead(reply: str) -> tuple[str, dict[str, Any] | None]:
     m = _LEAD_RE.search(reply)
     if not m:
         return reply.strip(), None
-    visible = reply[:m.start()].strip()
+    visible = (reply[:m.start()] + reply[m.end():]).strip()
     try:
         contact = json.loads(m.group(1))
         if not isinstance(contact, dict):

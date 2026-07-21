@@ -29,20 +29,22 @@
  --green:#2F5A3A;--green-d:#1E3D27;--wood:#B98B5E;--wood-d:#8A6238;--clay:#C2502F;
  font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
 #tyos-root *{box-sizing:border-box;margin:0;padding:0}
-#tyos-root .fab{position:fixed;right:26px;bottom:26px;display:inline-flex;align-items:center;gap:10px;background:var(--green);color:#fff;font-size:14px;font-weight:500;padding:13px 18px;border-radius:30px;box-shadow:0 8px 24px rgba(31,27,22,.18);cursor:pointer;z-index:2147483640;border:none}
+#tyos-root .fab{position:fixed;right:26px;bottom:26px;display:inline-flex;align-items:center;gap:10px;background:var(--green);color:#fff;font-size:14px;font-weight:500;padding:13px 18px;border-radius:30px;box-shadow:0 0 0 3px rgba(255,255,255,.9),0 8px 24px rgba(31,27,22,.28);cursor:pointer;z-index:2147483640;border:none}
 #tyos-root .fab svg{width:20px;height:20px}
 #tyos-root .fab:hover{background:var(--green-d)}
-#tyos-root .fab-teaser{position:fixed;right:30px;bottom:92px;max-width:262px;background:var(--green-d);color:#fff;border-radius:14px;padding:12px 40px 12px 13px;box-shadow:0 14px 34px rgba(31,27,22,.3);font-size:13.5px;font-weight:500;line-height:1.4;z-index:2147483641;cursor:pointer;opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .35s ease,transform .35s ease;display:flex;align-items:center;gap:10px}
-#tyos-root .fab-teaser .tic{width:34px;height:34px;border-radius:50%;flex-shrink:0;overflow:hidden;background:var(--paper2)}
+#tyos-root .fab-teaser{position:fixed;right:30px;bottom:92px;max-width:262px;background:var(--green-d);color:#fff;border-radius:14px;padding:12px 40px 12px 13px;box-shadow:0 0 0 3px rgba(255,255,255,.9),0 14px 34px rgba(31,27,22,.32);font-size:13.5px;font-weight:500;line-height:1.4;z-index:2147483641;cursor:pointer;opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .35s ease,transform .35s ease;display:flex;align-items:center;gap:14px}
+#tyos-root .fab-teaser .tic{position:relative;width:46px;height:46px;border-radius:50%;flex-shrink:0;overflow:hidden;background:var(--paper2)}
 #tyos-root .fab-teaser .tic img{width:100%;height:100%;object-fit:cover}
+#tyos-root .fab-teaser .tic::after{content:"";position:absolute;right:-1px;bottom:-1px;width:12px;height:12px;border-radius:50%;background:#4ecb71;border:2px solid var(--green-d)}
 #tyos-root .fab-teaser.show{opacity:1;transform:translateY(0);pointer-events:auto}
-#tyos-root .fab-teaser::after{content:"";position:absolute;right:30px;bottom:-6px;width:13px;height:13px;background:var(--green-d);transform:rotate(45deg);border-radius:0 0 3px 0}
-#tyos-root .fab-teaser .tx{position:absolute;top:8px;right:9px;width:22px;height:22px;border:none;background:rgba(255,255,255,.15);color:#fff;font-size:13px;line-height:1;cursor:pointer;border-radius:50%;display:flex;align-items:center;justify-content:center}
+#tyos-root .fab-teaser::after{content:"";position:absolute;right:30px;bottom:-7px;width:16px;height:16px;background:var(--green-d);transform:rotate(45deg);border-radius:4px}
+#tyos-root .fab-teaser .tx{position:absolute;top:6px;right:6px;width:28px;height:28px;border:none;background:rgba(255,255,255,.15);color:#fff;font-size:13px;line-height:1;cursor:pointer;border-radius:50%;display:flex;align-items:center;justify-content:center}
 #tyos-root .fab-teaser .tx:hover{background:rgba(255,255,255,.28)}
 #tyos-root .chatwin{position:fixed;right:26px;bottom:90px;width:360px;max-width:calc(100vw - 36px);background:#fff;border:1px solid var(--line);border-radius:18px;overflow:hidden;box-shadow:0 16px 44px rgba(31,27,22,.22);z-index:2147483639;display:none;flex-direction:column}
 #tyos-root .chatwin.open{display:flex}
 #tyos-root .chathead{background:var(--green);color:#fff;padding:14px 16px;display:flex;align-items:center;gap:11px}
-#tyos-root .ava{width:36px;height:36px;border-radius:50%;background:var(--paper2);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;overflow:hidden}
+#tyos-root .ava{position:relative;width:36px;height:36px;border-radius:50%;background:var(--paper2);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;overflow:hidden}
+#tyos-root .ava::after{content:"";position:absolute;right:-1px;bottom:-1px;width:10px;height:10px;border-radius:50%;background:#4ecb71;border:2px solid var(--green)}
 #tyos-root .ava img{width:100%;height:100%;object-fit:cover}
 #tyos-root .chathead b{font-size:14px;font-weight:600;display:block}
 #tyos-root .chathead small{font-size:11px;opacity:.85}
@@ -73,7 +75,7 @@
 #tyos-root.has-mic .chatfoot .mic{display:flex}
 #tyos-root .chatfoot .mic.rec{background:var(--clay);border-color:var(--clay);color:#fff;animation:tyos-micpulse 1.1s ease-in-out infinite}
 @keyframes tyos-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(194,80,47,.5)}50%{box-shadow:0 0 0 7px rgba(194,80,47,0)}}
-@media(max-width:560px){#tyos-root .chatwin{right:8px;bottom:80px}#tyos-root .fab{right:12px;bottom:12px}#tyos-root .fab-teaser{right:14px;bottom:78px;max-width:215px}#tyos-root .fab-teaser::after{right:26px}}
+@media(max-width:560px){#tyos-root .chatwin{top:0;left:0;right:0;bottom:0;width:100%;max-width:100%;height:100%;max-height:100%;border-radius:0}#tyos-root .chatbody{height:auto;max-height:none;flex:1 1 auto}#tyos-root .fab{right:12px;bottom:12px}#tyos-root .fab-teaser{right:14px;bottom:78px;max-width:215px}#tyos-root .fab-teaser::after{right:26px}#tyos-root.chat-open .fab{display:none}}
 `;
 
   var ICON_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 0 1-11.5 7.2L3 21l1.8-6.5A8 8 0 1 1 21 12z"></path></svg>';
@@ -129,6 +131,11 @@
 
     function mdToHtml(text) {
       var s = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      s = s.replace(/(https?:\/\/[^\s<>"']+)/g, function (url) {
+        var trail = "", m = url.match(/[.,;:!?)\]]+$/);
+        if (m) { trail = m[0]; url = url.slice(0, -trail.length); }
+        return '<a href="' + url + '" target="_blank" rel="noopener">' + url + "</a>" + trail;
+      });
       return s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
     }
     function addMsg(text, who) {
@@ -186,15 +193,18 @@
       try { saved = JSON.parse(sessionStorage.getItem(MKEY) || "null"); } catch (e) {}
       if (saved && saved.length) {
         // Restore prior conversation from sessionStorage (user navigated away and came back).
+        var userReplied = false;
         saved.forEach(function (m) {
           var d = document.createElement("div");
           d.className = "msg " + (m.w === "out" ? "out" : "in");
-          if (m.w === "out") d.textContent = m.t; else d.innerHTML = mdToHtml(m.t);
+          if (m.w === "out") { d.textContent = m.t; userReplied = true; } else d.innerHTML = mdToHtml(m.t);
           bodyEl.appendChild(d);
         });
-        scroll();
+        if (!userReplied) { addChips(START_CHIPS); bodyEl.scrollTop = 0; }
+        else scroll();
       } else {
         addMsg(GREETING, "in"); addChips(START_CHIPS);
+        bodyEl.scrollTop = 0;
       }
     }
 
@@ -283,6 +293,7 @@
     }
     function toggle() {
       winEl.classList.toggle("open");
+      root.classList.toggle("chat-open", winEl.classList.contains("open"));
       if (winEl.classList.contains("open")) { hideTeaser(); start(); inputEl.focus(); }
     }
 

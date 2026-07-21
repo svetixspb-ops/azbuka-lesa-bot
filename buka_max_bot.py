@@ -344,7 +344,7 @@ async def on_message(event: MessageCreated):
         )
         await _notify_manager(notify_text)
         await bot.send_message(user_id=uid, text=DONE_TEXT)
-        log.info("MAX handoff lead: user=%s name=%s phone=%s", uid, name, phone)
+        log.info("MAX handoff lead: user=%s", uid)
         return
 
     # Полный чат-режим (прямой вход или после хэндоффа)
