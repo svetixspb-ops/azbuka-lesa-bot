@@ -123,7 +123,18 @@ async def main() -> None:
 
     sessions = read_sessions_for_date(target_date)
     date_label = target_date.strftime("%d.%m.%Y")
-    header = f"📊 Дайджест Буки за {date_label}\nДиалогов: {len(sessions)}\n"
+    by_channel = {"сайт": 0, "MAX": 0, "ВК": 0, "?": 0}
+    for sid, _ in sessions:
+        if sid.startswith("web-"):
+            by_channel["сайт"] += 1
+        elif sid.startswith("max-"):
+            by_channel["MAX"] += 1
+        elif sid.startswith("vk-"):
+            by_channel["ВК"] += 1
+        else:
+            by_channel["?"] += 1
+    channel_line = ", ".join(f"{k}: {v}" for k, v in by_channel.items() if v)
+    header = f"📊 Дайджест Буки за {date_label}\nДиалогов: {len(sessions)} ({channel_line})\n"
 
     if not sessions:
         text = header + "\nЗа этот день диалогов не было."

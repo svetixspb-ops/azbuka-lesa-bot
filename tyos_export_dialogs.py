@@ -46,11 +46,21 @@ def load(date_from: datetime.date | None, date_to: datetime.date | None):
     return sessions
 
 
+def _channel_label(sid: str) -> str:
+    if sid.startswith("web-"):
+        return "сайт"
+    if sid.startswith("max-"):
+        return "MAX"
+    if sid.startswith("vk-"):
+        return "ВК"
+    return "?"
+
+
 def render(sessions) -> str:
     out = []
     for sid, turns in sessions.items():
         first_ts = turns[0][0].strftime("%d.%m.%Y %H:%M")
-        out.append(f"===== Диалог {sid} ({first_ts} МСК) =====\n")
+        out.append(f"===== Диалог {sid} [{_channel_label(sid)}] ({first_ts} МСК) =====\n")
         for dt, role, content in turns:
             who = "Клиент" if role == "user" else ("Бука" if role == "assistant" else str(role))
             out.append(f"[{dt.strftime('%H:%M:%S')}] {who}: {content}")
