@@ -61,6 +61,8 @@ def read_sessions(n_sessions: int):
                 except json.JSONDecodeError:
                     continue
                 sid = str(d.get("session_id", "?"))
+                if sid.startswith("navi-test-"):  # тестовые диалоги Нави — не считаем как реальных клиентов
+                    continue
                 sessions.setdefault(sid, []).append((d.get("role"), d.get("content", "")))
     except FileNotFoundError:
         return []
