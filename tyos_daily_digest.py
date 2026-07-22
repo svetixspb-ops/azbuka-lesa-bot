@@ -92,24 +92,25 @@ def render(sessions) -> str:
 
 async def send_telegram(text: str) -> bool:
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    admin_ids = (os.environ.get("ADMIN_IDS") or "").strip()
-    chat_id = admin_ids.split(",")[0].strip() if admin_ids else ""
-    if not (token and chat_id):
+    admin_ids = [cid.strip() for cid in (os.environ.get("ADMIN_IDS") or "").split(",") if cid.strip()]
+    if not (token and admin_ids):
         print("TELEGRAM_BOT_TOKEN/ADMIN_IDS не заданы — дайджест не отправлен.")
         return False
+    ok_all = True
     try:
         import aiohttp
         async with aiohttp.ClientSession() as s:
-            async with s.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as r:
-                data = await r.json()
-        if not data.get("ok"):
-            print("TG send failed:", data)
-            return False
-        return True
+            for chat_id in admin_ids:
+                async with s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    data = await r.json()
+                if not data.get("ok"):
+                    print(f"TG send failed for {chat_id}:", data)
+                    ok_all = False
+        return ok_all
     except Exception as e:
         print("TG send failed:", e)
         return False
