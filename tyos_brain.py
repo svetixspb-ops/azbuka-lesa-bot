@@ -553,7 +553,15 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
             visible = _DELIVERY_QUESTION
         else:
             # Полный снимок заказа (состав + услуги + доставка + срок + итог), всё кодом.
-            visible = tyos_order.render_summary(order)
+            # Если заказ не менялся с прошлого показа итога (например, клиент написал
+            # «оформляем» после уже показанного расчёта), не дублируем текст один в один.
+            sig = json.dumps({k: order.get(k) for k in ("items", "services", "delivery", "deadline")},
+                              sort_keys=True, ensure_ascii=False)
+            if session.get("last_summary_sig") == sig:
+                visible = "Расчёт тот же, что выше — жду ваш выбор: MAX или телефон."
+            else:
+                visible = tyos_order.render_summary(order)
+                session["last_summary_sig"] = sig
             packet = tyos_order.to_packet(order, session_id=session_id)
             token = tyos_handoff.save(packet)
             max_url = (MAX_BOT_LINK + ("&" if "?" in MAX_BOT_LINK else "?")
