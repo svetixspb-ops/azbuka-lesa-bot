@@ -4,9 +4,12 @@ LLM передаёт сюда структурированные парамет�
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+import product_attrs
 
 DB_PATH = Path(__file__).resolve().parent / "catalog.db"
 
@@ -57,6 +60,20 @@ def _stem_token(t: str) -> str:
     return t[:-1] if len(t) > 4 and t[-1] in _VOWELS else t
 
 
+def _enrich_with_attrs(row: dict[str, Any]) -> dict[str, Any]:
+    """Подмешать реальные характеристики карточки (product_attrs.py) — url и
+    Влажность/Тех.обработка/Поверхность/Порода/Сорт. Нет данных — не трогаем строку,
+    ничего не выдумываем (см. правило 18а в tyos_prompts.py)."""
+    scraped = product_attrs.get(str(row["id"]))
+    if scraped:
+        if scraped.get("url"):
+            row["url"] = scraped["url"]
+        line = product_attrs.relevant_line(scraped.get("attrs") or {})
+        if line:
+            row["attrs_line"] = line
+    return row
+
+
 def _do_search(
     sql_parts: list[str],
     params: list[Any],
@@ -65,7 +82,8 @@ def _do_search(
     sql = "SELECT * FROM products WHERE " + " AND ".join(sql_parts) + " ORDER BY count DESC LIMIT ?"
     params = params + [limit]
     with _connect() as con:
-        return [dict(r) for r in con.execute(sql, params).fetchall()]
+        rows = [dict(r) for r in con.execute(sql, params).fetchall()]
+    return [_enrich_with_attrs(r) for r in rows]
 
 
 def search(
@@ -205,9 +223,26 @@ def pieces_for_volume(thickness_mm: float, width_mm: float, length_mm: float, ta
     return max(1, math.ceil(target_m3 / v1))
 
 
+def _description_extra(p: dict[str, Any]) -> str | None:
+    """Фолбэк, если карточку не удалось сопоставить (attrs_line нет): в description
+    фида иногда есть то, чего нет в name (порода/влажность/сорт в скобках) — не
+    выдумываем, просто берём то, что реально написано в фиде."""
+    desc = (p.get("description") or "").strip()
+    name = (p.get("name") or "").strip()
+    if not desc or desc == name:
+        return None
+    groups = [g.strip() for g in re.findall(r"\(([^)]+)\)", desc)]
+    extra = [g for g in groups if g and g not in name]
+    return ", ".join(extra) if extra else None
+
+
 def format_product_line(p: dict[str, Any]) -> str:
-    """Однострочка для контекста LLM: имя, цена, остаток, объём."""
-    parts = [p["name"], f"{int(p['price'])} ₽"]
+    """Однострочка для контекста LLM: имя, характеристики, цена, остаток, объём."""
+    parts = [p["name"]]
+    attrs_line = p.get("attrs_line") or _description_extra(p)
+    if attrs_line:
+        parts.append(attrs_line)
+    parts.append(f"{int(p['price'])} ₽")
     if p.get("pack_count"):
         parts.append(f"уп. {p['pack_count']} шт")
     if p["count"]:
