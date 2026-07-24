@@ -35,6 +35,10 @@ from tyos_prompts import build_system_prompt
 # кнопка «продолжить в MAX» показывает, что расчёт сохранён, и ждёт бота.
 MAX_BOT_LINK = (os.environ.get("TYOS_MAX_BOT_LINK") or "").strip()
 
+# Ссылка на сообщество ВК Азбуки (buka_vk_bot.py читает ?ref=<token> из первого
+# сообщения и поднимает расчёт — см. buka_vk_bot._on_message).
+VK_GROUP_LINK = (os.environ.get("TYOS_VK_GROUP_LINK") or "").strip()
+
 log = logging.getLogger("tyos.brain")
 
 # Журнал полных диалогов — основа для еженедельного аудита. Одна строка = одна
@@ -566,9 +570,13 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
             token = tyos_handoff.save(packet)
             max_url = (MAX_BOT_LINK + ("&" if "?" in MAX_BOT_LINK else "?")
                        + "start=" + token) if MAX_BOT_LINK else ""
+            vk_url = (VK_GROUP_LINK + ("&" if "?" in VK_GROUP_LINK else "?")
+                      + "ref=" + token) if VK_GROUP_LINK else ""
             actions = [
                 {"type": "max", "label": "💾 Забронировать и продолжить в MAX",
                  "url": max_url, "token": token},
+                {"type": "vk", "label": "🌲 Забронировать и продолжить в ВК",
+                 "url": vk_url, "token": token},
                 {"type": "phone", "label": "📞 Забронировать — оставить телефон"},
             ]
 
