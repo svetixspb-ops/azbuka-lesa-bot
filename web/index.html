@@ -157,7 +157,7 @@ const TyosWidget = (() => {
     row.className = "acts";
     list.forEach(a => {
       const b = document.createElement("div");
-      b.className = "act " + (a.type === "max" ? "primary" : "ghost");
+      b.className = "act " + (a.type === "max" || a.type === "vk" ? "primary" : "ghost");
       b.textContent = a.label;
       b.onclick = () => {
         row.remove();

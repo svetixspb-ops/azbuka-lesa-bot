@@ -85,6 +85,12 @@ _ORDER_INTENT_KW = ("оформ", "беру", "заказыва", "хочу за
                     "передайте менеджер", "передать менеджер", "давайте оформ", "оформляем")
 _PHONE_RE = re.compile(r"\d[\d\-\s()]{6,}\d")
 
+# Ограничение «проси номер максимум 2 раза» (просьба Светы 2026-07-24) считаем ПО
+# КЛИЕНТУ (сколько раз он говорит про телефон, но не даёт цифры), а не по точной
+# формулировке модели — модель каждый раз перефразирует немного иначе, строковое
+# совпадение с фиксированной фразой ненадёжно (проверено вживую, промахивалось).
+_PHONE_INTENT_KW = ("по телефон", "позвон", "созвон", "телефону")
+
 
 # Детерминированный захват услуги-обработки из реплики клиента (страховка к set_service).
 _SERVICE_MAP = (("пропитк", "пропитка"), ("антисепт", "антисептик"), ("огнезащит", "огнезащита"),
@@ -562,7 +568,7 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
             sig = json.dumps({k: order.get(k) for k in ("items", "services", "delivery", "deadline")},
                               sort_keys=True, ensure_ascii=False)
             if session.get("last_summary_sig") == sig:
-                visible = "Расчёт тот же, что выше — жду ваш выбор: MAX или телефон."
+                visible = "Расчёт тот же, что выше — выберите мессенджер выше или напишите номер телефона."
             else:
                 visible = tyos_order.render_summary(order)
                 session["last_summary_sig"] = sig
@@ -573,12 +579,21 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
             vk_url = (VK_GROUP_LINK + ("&" if "?" in VK_GROUP_LINK else "?")
                       + "ref=" + token) if VK_GROUP_LINK else ""
             actions = [
-                {"type": "max", "label": "💾 Забронировать и продолжить в MAX",
+                {"type": "max", "label": "💬 Продолжить в MAX",
                  "url": max_url, "token": token},
-                {"type": "vk", "label": "🌲 Забронировать и продолжить в ВК",
+                {"type": "vk", "label": "🌲 Продолжить в ВК",
                  "url": vk_url, "token": token},
-                {"type": "phone", "label": "📞 Забронировать — оставить телефон"},
             ]
+
+    # Ограничение «проси номер максимум 2 раза» (просьба Светы 2026-07-24): считаем,
+    # сколько раз клиент говорит про телефон, но не даёт цифр — на 3-й раз глушим
+    # модель кодом, а не полагаемся на то, что она сама досчитает до двух.
+    if not contact and not _has_phone(text) and any(kw in text.lower() for kw in _PHONE_INTENT_KW):
+        asked = session.get("phone_ask_count", 0) + 1
+        session["phone_ask_count"] = asked
+        if asked > 2:
+            visible = ("Хорошо, буду ждать — как надумаете, просто напишите номер "
+                       "или выберите мессенджер выше.")
 
     # Markdown больше НЕ вырезаем — виджет рендерит **жирный** (формат-карточки).
     # Чистим только лишние # и одиночные * на всякий случай.
