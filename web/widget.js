@@ -75,7 +75,7 @@
 #tyos-root.has-mic .chatfoot .mic{display:flex}
 #tyos-root .chatfoot .mic.rec{background:var(--clay);border-color:var(--clay);color:#fff;animation:tyos-micpulse 1.1s ease-in-out infinite}
 @keyframes tyos-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(194,80,47,.5)}50%{box-shadow:0 0 0 7px rgba(194,80,47,0)}}
-@media(max-width:560px){#tyos-root .chatwin{top:0;left:0;right:0;bottom:0;width:100%;max-width:100%;height:100%;max-height:100%;border-radius:0}#tyos-root .chatbody{height:auto;max-height:none;flex:1 1 auto}#tyos-root .fab{right:12px;bottom:12px}#tyos-root .fab-teaser{right:14px;bottom:78px;max-width:215px}#tyos-root .fab-teaser::after{right:26px}#tyos-root.chat-open .fab{display:none}}
+@media(max-width:560px){#tyos-root .chatwin{top:0;left:0;right:0;bottom:0;width:100%;max-width:100%;height:100vh;height:100dvh;max-height:100vh;max-height:100dvh;border-radius:0}#tyos-root .chatbody{height:auto;max-height:none;flex:1 1 auto}#tyos-root .fab{right:12px;bottom:12px}#tyos-root .fab-teaser{right:14px;bottom:78px;max-width:215px}#tyos-root .fab-teaser::after{right:26px}#tyos-root.chat-open .fab{display:none}}
 `;
 
   var ICON_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 0 1-11.5 7.2L3 21l1.8-6.5A8 8 0 1 1 21 12z"></path></svg>';
