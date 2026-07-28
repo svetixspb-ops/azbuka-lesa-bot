@@ -155,6 +155,23 @@ def search(
     if not has_filter:
         return []
 
+    # Двухчисловые товары без явной толщины (дверь/окно/щит «900х2000») — extract_query
+    # кладёт первое число в width_mm, второе в length_mm (Ш×В на слух), а импорт
+    # каталога для ЛЮБОГО товара парсит числа в названии по порядку в thickness_mm/
+    # width_mm (см. data_loader.py) — для «Дверь... 900х2000» это thickness_mm=900,
+    # width_mm=2000. Из-за разъезда конвенций строгий поиск даёт 0, а нижняя лесенка
+    # (дропает токены) может подхватить случайный товар с тем же одним числом
+    # («мебельный щит 900х900» вместо двери 900х2000) — баг найден в дайджесте 27.07
+    # (дверь «Волна» 900х2000 → ответ «нет в каталоге», хотя товар есть). Поэтому
+    # пробуем точный swap (thickness_mm=width_mm, width_mm=length_mm) ПЕРВЫМ делом,
+    # раньше обычной лесенки — швап уже сам прогоняет полную лесенку с токенами.
+    if diameter_mm is None and thickness_mm is None and width_mm is not None and length_mm is not None:
+        swapped = search(text=text, thickness_mm=width_mm, width_mm=length_mm,
+                         length_mm=None, diameter_mm=None, species=species,
+                         available_only=available_only, limit=limit)
+        if swapped:
+            return swapped
+
     # Лесенка от строгого к мягкому. Минимум 1 фильтр всегда сохраняется,
     # чтобы не возвращать случайные товары.
     attempts: list[tuple[bool, bool, bool]] = [(True, True, True)]
