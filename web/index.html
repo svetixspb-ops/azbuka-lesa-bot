@@ -116,8 +116,7 @@ body.has-mic .chatfoot .mic{display:flex}
 
 <script>
 const TyosWidget = (() => {
-  const GREETING = "Здравствуйте! Я Бука, ИИ-консультант «Азбуки Леса». Подберу материал, посчитаю объём и цену. Чем помочь?";
-  const START_CHIPS = ["Подобрать под задачу", "Знаю, что нужно", "Рассчитать объём", "Доставка и оплата"];
+  const GREETING = "Здравствуйте! Я Бука, ИИ-консультант «Азбуки Леса». Задайте свой вопрос. С телефона можно голосом, я пойму. Отвечу мгновенно, в любое время суток. Для общения называть себя и свой номер телефона не требуется.\n\nПомогу найти нужный продукт на сайте, приму заявку на изготовление или дополнительную обработку. Говорите, не стесняйтесь.";
   const sid = "web-" + Math.random().toString(36).slice(2) + "-" + (performance.now()|0);
   let started = false, busy = false;
 
@@ -184,7 +183,6 @@ const TyosWidget = (() => {
   function start(){
     if(started) return; started = true;
     addMsg(GREETING, "in");
-    addChips(START_CHIPS);
   }
 
   async function sendText(text){

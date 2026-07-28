@@ -21,8 +21,7 @@
   var STATIC = API + "/static";
   var AVATAR = STATIC + "/tyos-avatar.png";
 
-  var GREETING = "Здравствуйте! Я Бука, ИИ-консультант «Азбуки Леса». Подберу материал, посчитаю объём и цену. Чем помочь?";
-  var START_CHIPS = ["Подобрать под задачу", "Знаю, что нужно", "Рассчитать объём", "Доставка и оплата"];
+  var GREETING = "Здравствуйте! Я Бука, ИИ-консультант «Азбуки Леса». Задайте свой вопрос. С телефона можно голосом, я пойму. Отвечу мгновенно, в любое время суток. Для общения называть себя и свой номер телефона не требуется.\n\nПомогу найти нужный продукт на сайте, приму заявку на изготовление или дополнительную обработку. Говорите, не стесняйтесь.";
 
   var CSS = `
 #tyos-root{--paper:#FAF7F1;--paper2:#F1EADD;--ink:#1F1B16;--mute:#6B6258;--line:#E7E0D5;
@@ -200,10 +199,10 @@
           if (m.w === "out") { d.textContent = m.t; userReplied = true; } else d.innerHTML = mdToHtml(m.t);
           bodyEl.appendChild(d);
         });
-        if (!userReplied) { addChips(START_CHIPS); bodyEl.scrollTop = 0; }
+        if (!userReplied) { bodyEl.scrollTop = 0; }
         else scroll();
       } else {
-        addMsg(GREETING, "in"); addChips(START_CHIPS);
+        addMsg(GREETING, "in");
         bodyEl.scrollTop = 0;
       }
     }
