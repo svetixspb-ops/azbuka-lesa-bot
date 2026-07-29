@@ -381,6 +381,7 @@ async def on_message(http: aiohttp.ClientSession, message: dict) -> None:
     if step == "phone":
         user_state["phone"] = text
         user_state["step"] = "chat"  # сразу в чат-режим
+        user_state["lead_delivered"] = True
         _set_user_state(uid, user_state)
 
         packet = user_state.get("packet", {})
@@ -430,6 +431,8 @@ async def on_message(http: aiohttp.ClientSession, message: dict) -> None:
     if _is_vk_contact_signal(text) and not result.get("lead"):
         delivered = await _deliver_vk_lead(uid, session_id)
         if delivered:
+            user_state["lead_delivered"] = True
+            _set_user_state(uid, user_state)
             await vk_send(
                 http, peer,
                 "Передал менеджеру — напишет вам здесь в ВК в ближайшее время. 🌿"
@@ -444,6 +447,8 @@ async def on_message(http: aiohttp.ClientSession, message: dict) -> None:
         await _notify_hot_order(http, uid, session_id)
 
     if result.get("lead"):
+        user_state["lead_delivered"] = True
+        _set_user_state(uid, user_state)
         log.info("lead delivered via VK chat: user=%s status=%s", uid, result["lead"])
 
 
@@ -457,8 +462,9 @@ async def reminder_loop(http: aiohttp.ClientSession):
             for uid_str, user_state in state.items():
                 last = user_state.get("last_activity", 0)
                 sent = user_state.get("reminder_sent", False)
+                lead_delivered = user_state.get("lead_delivered", False)
                 step = user_state.get("step")
-                if sent or not last or step not in ("chat", None):
+                if sent or lead_delivered or not last or step not in ("chat", None):
                     continue
                 if now - last < REMINDER_DELAY:
                     continue
