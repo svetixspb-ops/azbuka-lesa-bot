@@ -491,6 +491,7 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     except (Exception, asyncio.TimeoutError) as e:
         log.warning("run_tools failed/timeout: %s", e)
         history.pop()  # не сохраняем повисшую реплику
+        asyncio.create_task(tyos_lead.alert_failure(session_id, str(e)))
         return {"reply": "Извините, ответ задержался. Повторите, пожалуйста, вопрос — "
                          "или оставьте телефон, и менеджер свяжется.",
                 "chips": [], "lead": None, "actions": []}

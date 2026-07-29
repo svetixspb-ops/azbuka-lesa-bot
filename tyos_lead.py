@@ -174,3 +174,59 @@ async def deliver(lead: dict[str, Any]) -> dict[str, Any]:
     max_ok = await _send_max(text)
     tg_ok = await _send_telegram(text)
     return {"persisted": True, "max": max_ok, "telegram": tg_ok, "logged": True}
+
+
+async def _send_telegram_admins(text: str) -> bool:
+    """Broadcast всем ADMIN_IDS (та же переменная, что у ежедневного дайджеста) —
+    сейчас это Света, добавится Артём после /start у @azbukalesa_bot."""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    admin_ids = [cid.strip() for cid in (os.environ.get("ADMIN_IDS") or "").split(",") if cid.strip()]
+    if not (token and admin_ids):
+        return False
+    ok_all = True
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as s:
+            for chat_id in admin_ids:
+                async with s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    data = await r.json()
+                if not data.get("ok"):
+                    log.error("alert TG send failed for %s: %s", chat_id, data)
+                    ok_all = False
+        return ok_all
+    except Exception as e:
+        log.exception("alert TG send failed: %s", e)
+        return False
+
+
+_ALERT_COOLDOWN = timedelta(minutes=20)
+_last_alert_at: datetime | None = None
+
+
+async def alert_failure(session_id: str, error: str) -> None:
+    """Мгновенный алерт (MAX Артёму + Telegram ADMIN_IDS) при сбое ответа Буки клиенту
+    (ошибка/таймаут LLM) — просьба Артёма, чтобы зависший диалог не узнавали через дни
+    случайно (см. инцидент со сбоем DeepSeek 25-26.07). Кулдаун 20 мин: при длительном
+    сбое провайдера (сотни запросов подряд) шлём один алерт, а не спамим на каждый."""
+    global _last_alert_at
+    now = datetime.now(MSK)
+    if _last_alert_at is not None and now - _last_alert_at < _ALERT_COOLDOWN:
+        return
+    _last_alert_at = now
+    text = ("⚠️ Бука не смог ответить клиенту (сбой/таймаут ИИ).\n"
+            f"Сессия: {session_id}\n"
+            f"Ошибка: {error}\n"
+            f"({_now_msk_iso()})\n"
+            "Если сбой продолжается — сообщения будут копиться без ответа.")
+    try:
+        await _send_max(text)
+    except Exception:
+        log.exception("alert MAX failed")
+    try:
+        await _send_telegram_admins(text)
+    except Exception:
+        log.exception("alert TG failed")
