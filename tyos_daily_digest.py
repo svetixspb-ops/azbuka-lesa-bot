@@ -29,6 +29,7 @@ import llm  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIALOGS = os.path.join(HERE, "dialogs.jsonl")
+STT_LOG = os.path.join(HERE, "stt_log.jsonl")
 MSK = ZoneInfo("Europe/Moscow")
 
 DIGEST_PROMPT = """Ты — аналитик качества ИИ-консультанта «Бука» (магазин пиломатериалов «Азбука Леса»).
@@ -80,6 +81,29 @@ def read_sessions_for_date(target_date: datetime.date):
     return list(sessions.items())
 
 
+def count_stt_for_date(target_date: datetime.date) -> int:
+    n = 0
+    try:
+        with open(STT_LOG, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                try:
+                    dt = datetime.datetime.fromisoformat(d.get("ts", "")).astimezone(MSK)
+                except ValueError:
+                    continue
+                if dt.date() == target_date:
+                    n += 1
+    except FileNotFoundError:
+        return 0
+    return n
+
+
 def render(sessions) -> str:
     out = []
     for sid, turns in sessions:
@@ -116,6 +140,36 @@ async def send_telegram(text: str) -> bool:
         return False
 
 
+async def send_telegram_document(filename: str, content: str, caption: str = "") -> bool:
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    admin_ids = [cid.strip() for cid in (os.environ.get("ADMIN_IDS") or "").split(",") if cid.strip()]
+    if not (token and admin_ids):
+        return False
+    ok_all = True
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as s:
+            for chat_id in admin_ids:
+                form = aiohttp.FormData()
+                form.add_field("chat_id", chat_id)
+                if caption:
+                    form.add_field("caption", caption)
+                form.add_field("document", content.encode("utf-8"), filename=filename, content_type="text/plain")
+                async with s.post(
+                    f"https://api.telegram.org/bot{token}/sendDocument",
+                    data=form,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as r:
+                    data = await r.json()
+                if not data.get("ok"):
+                    print(f"TG document send failed for {chat_id}:", data)
+                    ok_all = False
+        return ok_all
+    except Exception as e:
+        print("TG document send failed:", e)
+        return False
+
+
 async def main() -> None:
     if len(sys.argv) > 1:
         target_date = datetime.date.fromisoformat(sys.argv[1])
@@ -135,7 +189,9 @@ async def main() -> None:
         else:
             by_channel["?"] += 1
     channel_line = ", ".join(f"{k}: {v}" for k, v in by_channel.items() if v)
-    header = f"📊 Дайджест Буки за {date_label}\nДиалогов: {len(sessions)} ({channel_line})\n"
+    stt_count = count_stt_for_date(target_date)
+    voice_line = f"\nГолосовых сообщений: {stt_count}" if stt_count else ""
+    header = f"📊 Дайджест Буки за {date_label}\nДиалогов: {len(sessions)} ({channel_line}){voice_line}\n"
 
     if not sessions:
         text = header + "\nЗа этот день диалогов не было."
@@ -143,7 +199,8 @@ async def main() -> None:
         await send_telegram(text)
         return
 
-    dialogs = render(sessions)[-20000:]
+    dialogs_full = render(sessions)
+    dialogs = dialogs_full[-20000:]
     prompt = DIGEST_PROMPT.format(date=date_label, dialogs=dialogs)
     body = (await llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=500)).strip()
 
@@ -151,6 +208,9 @@ async def main() -> None:
     print(text)
     ok = await send_telegram(text)
     print("Отправлено в Telegram:" if ok else "НЕ отправлено в Telegram (см. выше)", ok)
+
+    ok_doc = await send_telegram_document(f"dialogi_{target_date.isoformat()}.txt", dialogs_full, caption=f"Диалоги за {date_label}")
+    print("Файл с диалогами отправлен:" if ok_doc else "Файл с диалогами НЕ отправлен", ok_doc)
 
 
 if __name__ == "__main__":

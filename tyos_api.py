@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiohttp import web
@@ -39,6 +41,23 @@ log = logging.getLogger("tyos-api")
 TYOS_PORT = int(os.environ.get("TYOS_PORT", "8091"))
 # слушаем только localhost: наружу нас отдаёт nginx (tyos-https), прямой bind на 0.0.0.0 был лишним
 TYOS_HOST = os.environ.get("TYOS_HOST", "127.0.0.1")
+
+# Журнал успешных голосовых сообщений — для дневного дайджеста (сколько клиентов
+# пользуются микрофоном). /stt не знает session_id (клиент шлёт только аудио), поэтому
+# считаем сами факты распознавания, без привязки к конкретному диалогу.
+_STT_LOG_PATH = ROOT / "stt_log.jsonl"
+_MSK = timezone(timedelta(hours=3))
+
+
+def _log_stt(chars: int) -> None:
+    try:
+        with open(_STT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.now(_MSK).isoformat(timespec="seconds"),
+                "chars": chars,
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        log.exception("не удалось записать stt_log.jsonl")
 
 # --- rate-limit: /chat и /stt дёргают платные API (LLM/STT), без лимита возможна накрутка ---
 import time
@@ -149,6 +168,7 @@ async def handle_stt(request: web.Request) -> web.Response:
     except Exception as e:
         log.exception("stt failed: %s", e)
         return web.json_response({"error": "stt_failed", "detail": str(e)}, status=502)
+    _log_stt(len(text))
     return web.json_response({"text": text})
 
 
