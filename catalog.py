@@ -178,12 +178,14 @@ def search(
     if species:
         attempts.append((False, True, True))  # снимаем породу
     if length_mm is not None and (has_dims or primary):
-        attempts.append((False, False, True))  # снимаем длину
-    if primary and has_dims:
-        attempts.append((False, False, False))  # только размеры
-    elif primary and not has_dims:
-        # есть только текст — никогда не дропаем токены, иначе вернём мусор
-        pass
+        attempts.append((False, False, True))  # снимаем длину — предложит то же сечение в другой длине (можно распилить)
+    # «Только размеры» (без названия) — ТОЛЬКО когда названия вообще нет. Если primary
+    # непустой (клиент назвал материал — «брусок», «доска» и т.п.), токены НИКОГДА не
+    # дропаем: иначе поиск по одним размерам подсовывает товар другой категории с теми
+    # же цифрами в названии («Брусок 40х60х2500» → «Уголок 40х60х2500» — разное назначение
+    # в строительстве, баг от Артёма 17.08).
+    if not primary and has_dims:
+        attempts.append((False, False, False))
 
     seen = set()
     for flags in attempts:
@@ -194,8 +196,13 @@ def search(
         if results:
             return results
     # Допуск по размерам: «около 15 см» ловит 16/18 мм и т.п., когда точного совпадения нет.
+    # Та же граница: без названия — токены дропать некуда (их и не было), с названием —
+    # держим токены строго во всех попытках допуска.
     if has_dims:
-        for flags in [(False, True, True), (False, False, True), (False, False, False)]:
+        tol_flags = [(False, True, True), (False, False, True)]
+        if not primary:
+            tol_flags.append((False, False, False))
+        for flags in tol_flags:
             results = attempt(*flags, dim_tol=0.25)
             if results:
                 return results
