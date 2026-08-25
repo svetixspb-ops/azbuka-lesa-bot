@@ -185,11 +185,19 @@ def load_into_db(xml_bytes: bytes, db_path: Path = DB_PATH) -> dict[str, int]:
     shop = root.find("shop")
     yml_date = root.get("date", "")
 
-    if db_path.exists():
-        db_path.unlink()  # фуллресет — каталог небольшой, итоги атомарны
     con = sqlite3.connect(db_path)
     try:
         init_db(con)
+        # Полный ресет строк products/categories (не файла БД!) — фид не даёт
+        # дельту, поэтому старые позиции, пропавшие из фида, должны исчезнуть.
+        # Раньше здесь удалялся весь файл catalog.db (db_path.unlink()), что
+        # заодно сносило и product_attrs (url + характеристики карточек,
+        # наполняется раз в неделю scrape_product_attrs.py) — почти всю неделю,
+        # кроме нескольких часов после понедельничного скрейпа, у товаров не
+        # было ни ссылки на карточку, ни проверенных характеристик (баг найден
+        # 25.08 — вопрос Артёма, почему Бука не даёт прямую ссылку на товар).
+        con.execute("DELETE FROM products")
+        con.execute("DELETE FROM categories")
         cats = shop.find("categories") or []
         cat_rows = [(c.get("id"), c.get("parentId"), (c.text or "").strip()) for c in cats]
         con.executemany(
