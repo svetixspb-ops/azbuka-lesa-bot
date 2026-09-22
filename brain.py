@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import catalog
@@ -23,6 +24,35 @@ import llm
 import prompts
 
 log = logging.getLogger("vera-brain")
+
+_MSK = timezone(timedelta(hours=3))
+_MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня",
+              "июля", "августа", "сентября", "октября", "ноября", "декабря")
+_WEEKDAYS_RU = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def _resolve_relative_date(text: str) -> str | None:
+    """«послезавтра»/«завтра»/«в пятницу» и т.п. -> «23 сентября». None, если не распознано —
+    тогда в ответе клиенту остаётся только его собственная формулировка, без выдумки даты."""
+    low = text.strip().lower()
+    now = datetime.now(_MSK)
+    offset = None
+    if "послезавтра" in low:
+        offset = 2
+    elif "сегодня" in low:
+        offset = 0
+    elif "завтра" in low:
+        offset = 1
+    else:
+        for i, wd in enumerate(_WEEKDAYS_RU):
+            if wd[:5] in low:
+                delta = (i - now.weekday()) % 7
+                offset = delta if delta != 0 else 7  # «в понедельник» в сам понедельник = через неделю
+                break
+    if offset is None:
+        return None
+    target = now + timedelta(days=offset)
+    return f"{target.day} {_MONTHS_RU[target.month - 1]}"
 
 HISTORY_MAX = 8  # 4 user + 4 assistant turns
 # session_id — строка (Telegram uid как str, либо call-id Voximplant)
@@ -127,7 +157,8 @@ def _order_summary(sid: str) -> str | None:
         ref = r.get("ref") or "позиция"
         parts.append(f"{ref} — {qp}" if qp else ref)
     body = "; ".join(parts)
-    return f"Давайте повторим ваш заказ. {body}. Итого по заказу {_rubles(grand)}."
+    return (f"Давайте повторим ваш заказ. {body}. Итого по заказу {_rubles(grand)} — "
+            f"это предварительная стоимость, точную озвучит менеджер.")
 
 
 def _order_volume_length(sid: str) -> tuple[float | None, float | None]:
@@ -188,8 +219,13 @@ def _search_item(it: dict[str, Any]) -> list[dict[str, Any]]:
     return products
 
 
-def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any]]]]) -> str:
-    """Контекст для LLM, сгруппированный по позициям запроса клиента."""
+def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+                          asked_avail: bool = False, asked_price: bool = False) -> str:
+    """Контекст для LLM, сгруппированный по позициям запроса клиента.
+
+    asked_avail/asked_price — клиент спросил про наличие/цену НАПРЯМУЮ в этой реплике (разворот
+    Артёма 22.09.2026). По умолчанию (оба False) Вера не сверяется с остатком вслух и не называет
+    цену — просто фиксирует заявку; цену итога клиент услышит в конце разговора (см. _order_summary)."""
     if not per_item:
         return ("В этой реплике товара нет — это приветствие, уточнение, подтверждение (да/нет/спасибо) "
                 "или завершение разговора. Продолжай по контексту истории диалога: если заказ уже собран "
@@ -213,17 +249,22 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
             hints.append(f"нужно {it['packs']} уп")
         hint_s = f" — {', '.join(hints)}" if hints else ""
         blocks.append(f"\nПозиция {i}: «{label}»{hint_s}")
-        # Слишком много совпадений (или вообще без параметров) → НЕ зачитываем список
+        # Слишком много совпадений И вообще без параметров → НЕ зачитываем список
         # (для голоса длинный перечень = плохо), просим уточнить ОДИН параметр.
+        # Если вариантов и так МАЛО (≤3) — уточнять нечего, выбирать не из чего: показываем
+        # их сразу, даже если клиент не назвал ни одного параметра (баг Артёма 21.09 — «ДВП»:
+        # в наличии всего 1 позиция, а Вера зациклилась в «назовите длину», «назовите толщину»,
+        # хотя выбирать было решительно не из чего). Если ни один из показанных не подойдёт
+        # клиенту — обычный сценарий сметного отдела (см. ветку "иначе не подошло" в промпте).
         no_params = not any(it.get(k) for k in ("thickness_mm", "width_mm", "length_mm", "diameter_mm", "grade", "target_m3", "quantity_pieces", "packs"))
         # Есть ли вообще сорт у найденных позиций — чтобы Вера не спрашивала про сорт там, где его нет.
         has_grade = any((p.get("sort") or "").strip() for p in products) if products else False
         has_qty = any(it.get(k) for k in ("quantity_pieces", "packs", "target_m3"))
-        if products and (no_params or len(products) > 3):
-            narrow_by = "длину или назначение" if not has_grade else "длину, сорт или назначение"
+        if products and len(products) > 3 and no_params:
+            narrow_by = "размер и влажность" if not has_grade else "размер, влажность или сорт"
             blocks.append(f"  — в наличии {len(products)} вариантов. "
                           f"НЕ перечисляй их клиенту списком — задай ОДИН короткий уточняющий вопрос "
-                          f"про недостающий параметр ({narrow_by}), чтобы сузить до 1-2 вариантов.")
+                          f"про {narrow_by}, чтобы сузить до 1-2 вариантов.")
             if not has_grade:
                 blocks.append("  — ВНИМАНИЕ: сорт у этих позиций НЕ указан — про сорт НЕ спрашивай и сорта НЕ выдумывай.")
         elif products:
@@ -237,19 +278,26 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
                 line = "  — " + catalog.format_product_line(p)
                 tot = catalog.compute_total(p, it)
                 if tot:
-                    line += f"  | ИТОГ (точно, не пересчитывай): {tot['how']}"
+                    price_note = "ИТОГ (точно, не пересчитывай)" if (asked_price or asked_avail) else \
+                        "ИТОГ для справки — НЕ озвучивай сумму сейчас, только если клиент прямо спросит цену; иначе прозвучит в конце разговора"
+                    line += f"  | {price_note}: {tot['how']}"
                 blocks.append(line)
-                # Запрошено больше, чем в наличии → бот ОБЯЗАН предупредить, не оформлять молча.
+                # Запрошено больше, чем в наличии.
                 cnt = p.get("count") or 0
                 if req_qty and not p.get("pack_count") and req_qty > cnt:
-                    blocks.append(f"    ВНИМАНИЕ: клиент просит {int(req_qty)} шт, а в наличии только {cnt}. "
-                                  f"Скажи, что в наличии {cnt} шт: предложи оформить {cnt} сейчас, "
-                                  f"а недостающее передать в сметный отдел под заказ. НЕ оформляй {int(req_qty)} молча.")
+                    if asked_avail:
+                        blocks.append(f"    ВНИМАНИЕ: клиент просит {int(req_qty)} шт, а в наличии только {cnt}. "
+                                      f"Скажи, что в наличии {cnt} шт: предложи оформить {cnt} сейчас, "
+                                      f"а недостающее передать в сметный отдел под заказ. НЕ оформляй {int(req_qty)} молча.")
+                    else:
+                        blocks.append(f"    Наличие клиент не спрашивал — про нехватку ({cnt} из {int(req_qty)}) "
+                                      f"вслух НЕ говори. Просто запиши {int(req_qty)} шт как есть, менеджер уточнит.")
             if not has_grade:
                 blocks.append("  — сорт у этой позиции НЕ указан — про сорт НЕ спрашивай.")
             if len(products) <= 2 and not has_qty:
-                blocks.append("  — количество клиент пока не назвал: подтверди наличие и спроси, "
-                              "сколько штук нужно (для столбов/штучного товара — именно в ШТУКАХ, не в кубах).")
+                blocks.append("  — количество клиент пока не назвал: спроси, сколько штук нужно "
+                              "(для столбов/штучного товара — именно в ШТУКАХ, не в кубах). "
+                              "Про наличие говори, только если клиент сам спросил.")
         else:
             blocks.append("  — этого нет в переданном каталоге. НЕ говори «недоступно»/«не продаём»/«нет в продаже»/"
                           "«пока недоступно к заказу». Запиши позицию в заявку и скажи, что передашь её в сметный отдел — "
@@ -303,12 +351,66 @@ def _maybe_name(text: str) -> str | None:
 # но LLM запрещено называть цифры цен (правило в prompts.py).
 # ─────────────────────────────────────────────────────────────────────────────
 _LEN_WORD = {1: "один", 2: "два", 3: "три", 4: "четыре", 5: "пять", 6: "шесть"}
-_DESC_WORDS = ("профилирован", "антисептир", "биозащит", "огнезащит", "окрашен", "камерн", "сух")
+_DESC_WORDS = ("профилирован", "антисептир", "биозащит", "огнезащит", "окрашен", "камерн", "сух",
+               "завальцован", "строган")
+_NATURAL_MOISTURE_MARK = ("естествен",)
 _CHEAP_WORDS = ("дешевл", "подешевл", "недорог", "эконом", "бюджет", "попроще")
+# Прямой вопрос про наличие/цену (разворот Артёма 22.09.2026): по умолчанию Вера в это НЕ лезет,
+# отвечает предметно только когда клиент спросил явно.
+_AVAIL_Q_WORDS = ("наличи", "есть ли", "сколько есть", "сколько у вас", "остал", "в продаже", "сейчас есть")
+_PRICE_Q_WORDS = ("цен", "стоит", "стоимост", "почём", "почем", "сколько буд", "сколько выйдет")
 # Обработка-пропитка (биозащита/огнезащита): если нет готового — делаем за 1-2 дня (просьба Артёма 2026-06-01).
 _TREATMENT_WORDS = ("антисептир", "биозащит", "огнезащит", "антипир", "пропит")
 # Покраска — отдельная услуга: без поиска цены/количества, заявка менеджеру (просьба Артёма 2026-06-01).
 _PAINT_WORDS = ("покрас", "покраш", "окрас", "окраш", "крашен", "колер", "тонир")
+
+
+def _wants_natural_moisture(raw: str) -> bool:
+    """Клиент прямо просит НЕ сухую доску («естественной влажности» / «не сухая» / «не сухой»).
+
+    Баг 2026-09: подстрока «сух» есть и в «не сухая» — без этой проверки код читал отрицание
+    как запрос сухой доски и зацикливался, переспрашивая/подтверждая сухую снова и снова."""
+    if any(w in raw for w in _NATURAL_MOISTURE_MARK):
+        return True
+    return re.search(r"\bне\s+\S*сух", raw) is not None
+
+
+def _wants_unplaned(raw: str) -> bool:
+    """Клиент прямо просит НЕстроганную доску («нестроганная» / «не строганная»).
+
+    Симметрично _wants_natural_moisture: подстрока «строган» есть и в «нестроганная»,
+    без этой проверки отрицание читалось бы как запрос строганной."""
+    if "нестроган" in raw:
+        return True
+    return re.search(r"\bне\s+\S*строган", raw) is not None
+
+
+def _desc_words_in(raw: str) -> list[str]:
+    """Слова-исполнения из _DESC_WORDS, которые клиент ПОЛОЖИТЕЛЬНО запросил (без отрицания)."""
+    natural = _wants_natural_moisture(raw)
+    unplaned = _wants_unplaned(raw)
+    words = []
+    for w in _DESC_WORDS:
+        if w not in raw:
+            continue
+        if w == "сух" and natural:
+            continue
+        if w == "строган" and unplaned:
+            continue
+        words.append(w)
+    return words
+
+
+def _asks_availability(text: str) -> bool:
+    """Клиент ПРЯМО спросил про наличие/остатки — только тогда Вера в них лезет (Артём 22.09.2026)."""
+    t = text.lower()
+    return any(w in t for w in _AVAIL_Q_WORDS)
+
+
+def _asks_price(text: str) -> bool:
+    """Клиент ПРЯМО спросил про цену — только тогда Вера называет её сразу, а не в конце разговора."""
+    t = text.lower()
+    return any(w in t for w in _PRICE_Q_WORDS)
 
 
 def _len_phrase(length_mm: float | None) -> str:
@@ -421,11 +523,14 @@ def _confident_pick(it: dict[str, Any], products: list[dict[str, Any]]) -> dict[
         return None
     raw = (it.get("raw") or "").lower()
     cand = products
-    for w in _DESC_WORDS:
-        if w in raw:
-            f = [p for p in cand if w[:7] in (p.get("name") or "").lower()]
-            if f:
-                cand = f
+    if _wants_natural_moisture(raw):
+        natural = [p for p in cand if "сух" not in (p.get("name") or "").lower()]
+        if natural:
+            cand = natural
+    for w in _desc_words_in(raw):
+        f = [p for p in cand if w[:7] in (p.get("name") or "").lower()]
+        if f:
+            cand = f
     cand = _grade_filter(it, cand)  # уважать названный сорт (А/В/АВ), зашитый в название
     qty = catalog._to_num(it.get("quantity_pieces"))
     if qty:
@@ -440,7 +545,7 @@ def _confident_pick(it: dict[str, Any], products: list[dict[str, Any]]) -> dict[
 def _has_disambig(it: dict[str, Any]) -> bool:
     """Есть ли в запросе сигнал, позволяющий уверенно выбрать вариант среди разных типов."""
     raw = (it.get("raw") or "").lower()
-    return (any(w in raw for w in _DESC_WORDS) or any(w in raw for w in _CHEAP_WORDS)
+    return (bool(_desc_words_in(raw)) or _wants_natural_moisture(raw) or any(w in raw for w in _CHEAP_WORDS)
             or bool(catalog._to_num(it.get("quantity_pieces"))) or bool(catalog._to_num(it.get("packs"))))
 
 
@@ -578,7 +683,9 @@ def _desc_conflict(it: dict[str, Any], p: dict[str, Any]) -> bool:
     """Клиент назвал исполнение (сухая/антисептир…), которого у товара p НЕТ — нельзя его подсовывать."""
     raw = (it.get("raw") or "").lower()
     name = (p.get("name") or "").lower()
-    return any(w in raw and w[:5] not in name for w in _DESC_WORDS)
+    if _wants_natural_moisture(raw) and "сух" in name:
+        return True  # просил не сухую/естественной влажности — сухая p не подходит
+    return any(w[:5] not in name for w in _desc_words_in(raw))
 
 
 def _continues_locked(it: dict[str, Any], locked: dict[str, Any]) -> bool:
@@ -615,35 +722,60 @@ def _locked_or_pick(sid: str, it: dict[str, Any], exact: list[dict[str, Any]]) -
     return _confident_pick(it, exact)
 
 
-def _present(sid: str, it: dict[str, Any], p: dict[str, Any]) -> str:
+def _present(sid: str, it: dict[str, Any], p: dict[str, Any],
+             asked_avail: bool = False, asked_price: bool = False) -> str:
     """Озвучить выбранный товар p: либо итог по количеству, либо цену + вопрос «сколько?».
-    Запоминает p как обсуждаемый (LOCKED), чтобы следующая реплика считалась по нему же."""
+    Запоминает p как обсуждаемый (LOCKED), чтобы следующая реплика считалась по нему же.
+
+    Разворот Артёма 22.09.2026: наличие/остатки и цену Вера озвучивает ТОЛЬКО если клиент
+    спросил про них прямо (asked_avail/asked_price). По умолчанию — просто фиксирует заявку,
+    остаток/цену не называет; цену всего заказа клиент услышит в конце (см. _order_summary)."""
     LOCKED[sid] = p
     PENDING.pop(sid, None)  # количество подтверждено/озвучено — ожидание снято
     tot = catalog.compute_total(p, it)
     ref = _full_ref(p)   # полное наименование (с исполнением), просьба Артёма 2026-06-01
     cnt = p.get("count") or 0
     qn = catalog._to_num(it.get("quantity_pieces"))
-    if qn and not p.get("pack_count") and qn > cnt:
+    short = bool(qn) and not p.get("pack_count") and qn > cnt
+    if short and asked_avail:
         return (f"{ref.capitalize()} — в наличии только {_shtuk(cnt)}. Оформить {cnt} сейчас, "
                 f"а остальное передать в сметный отдел под заказ?")
-    if tot:
+    if tot and not short:
         _record_order_item(sid, it, [p])  # в заказ для доставки/сводки
         if tot["unit"] == "уп":
             packs_w = _plural(tot["n"], "упаковка", "упаковки", "упаковок")
             qty_phrase = f"{tot['n']} {packs_w} ({_shtuk(tot['pieces'])})"
         else:
             qty_phrase = _shtuk(tot["n"])
-        return f"Записала: {ref} — {qty_phrase}, {_rubles(tot['total'])}. Что-то ещё?"
+        price_part = f", {_rubles(tot['total'])}" if asked_price else ""
+        return f"Записала: {ref} — {qty_phrase}{price_part}. Что-то ещё?"
+    if short:
+        # По умолчанию (наличие не спросили) — не сверяемся с остатком вслух, просто фиксируем.
+        return (f"Записала: {ref} — {_shtuk(int(qn))}. Передам заявку менеджеру, он уточнит "
+                f"по наличию на сегодня. Что-то ещё?")
     ask = "Сколько упаковок вам нужно?" if p.get("pack_count") else "Сколько вам нужно?"
-    return f"Есть {ref} — {_price_phrase(p)}. {ask}"
+    price_part = f" — {_price_phrase(p)}" if asked_price else ""
+    return f"Есть {ref}{price_part}. {ask}"
 
 
-def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str, Any]]]]) -> str | None:
+_AVAIL_UNKNOWN_PHRASE = ("Я цифровой сотрудник, у меня данные на утро — возможно, за сегодня что-то "
+                         "уже произвели или привезли, но я этого не знаю. Давайте запишу ваши пожелания, "
+                         "и менеджер свяжется с вами с конкретикой.")
+
+
+def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+                    asked_avail: bool = False, asked_price: bool = False) -> str | None:
     """Детерминированная реплика для ОДИНОЧНОЙ определённой позиции.
 
     Цену/итог считает и озвучивает КОД по каталогу. Возвращает None — тогда отвечает LLM
     (мультизаказ, позиция без размеров, разные типы одного размера без сигнала выбора).
+
+    Разворот Артёма 22.09.2026: приоритет — принять и записать заявку, а не свериться с наличием.
+    Наличие/остаток и подбор БЛИЖАЙШЕГО варианта (когда точного размера/исполнения нет) Вера
+    озвучивает только если клиент спросил про наличие/цену НАПРЯМУЮ (asked_avail/asked_price) —
+    иначе просто уточняет недостающее (обычно длину) и фиксирует позицию как есть, наличие
+    решит менеджер. Исключение — обработка пропиткой (антисептик/огнезащита): по ней всегда
+    фиксированный ответ «2-3 дня, под заказ», это не вопрос наличия.
     """
     real = [(it, pr) for (it, pr) in per_item if (it.get("text") or "").strip()]
     if len(real) != 1:
@@ -654,7 +786,7 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
     # Считаем по той же позиции (locked) — цена в итоге совпадёт с озвученной в предложении.
     locked = LOCKED.get(sid)
     if locked and _continues_locked(it, locked) and not _desc_conflict(it, locked):
-        return _present(sid, it, locked)
+        return _present(sid, it, locked, asked_avail=asked_avail, asked_price=asked_price)
 
     has_dims = any(_req_dims(it))
     if not has_dims:
@@ -674,7 +806,30 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
     # Только товары, ТОЧНО совпавшие по названным размерам (без «съезда» поиска).
     exact = [p for p in products if _exact_match(p, it)]
 
+    # По умолчанию (клиент не попросил именно сухую) — приоритет НЕ сухой, естественной влажности
+    # (п.4 разворота Артёма 22.09.2026). Если сухая всё же выбрана, но строганная/завальцованная
+    # не названа явно — приоритет НЕстроганной. Срабатывает только если такой вариант реально есть.
+    raw_full = (it.get("raw") or "").lower()
+    if exact and "сух" not in raw_full:
+        natural_pref = [p for p in exact if "сух" not in (p.get("name") or "").lower()]
+        if natural_pref:
+            exact = natural_pref
+    if exact and not any(w in raw_full for w in ("строган", "завальцован")):
+        unplaned_pref = [p for p in exact if not any(w in (p.get("name") or "").lower()
+                                                       for w in ("строган", "завальцован"))]
+        if unplaned_pref:
+            exact = unplaned_pref
+
     if not exact:
+        if not (asked_avail or asked_price):
+            # ДЕФОЛТ: наличие не спросили — не сверяемся и не отказываем, просто уточняем
+            # недостающее (обычно длину) и фиксируем позицию как есть, дальше решит менеджер.
+            if not it.get("length_mm"):
+                return ("Поняла, уточните, пожалуйста, длину — запишу заявку, дальше менеджер "
+                        "подскажет по наличию.")
+            label = it.get("raw") or it.get("text") or "эту позицию"
+            return (f"Записала — {label}. Передам заявку менеджеру, он свяжется и уточнит "
+                    f"по наличию. Что-то ещё?")
         # Точного размера в наличии нет — предлагаем БЛИЖАЙШИЙ по размеру того же типа
         # (раньше брали первый по остатку — мог увести с 45×145 на 50×150).
         text = (it.get("text") or "").lower()
@@ -700,34 +855,45 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
             pk = catalog._to_num(it.get("packs"))
             # Этот вариант уже предлагали и клиент назвал количество/пачки → сразу считаем, не переспрашиваем.
             if locked and a.get("id") == locked.get("id") and (qn or pk):
-                return _present(sid, it, a)
+                return _present(sid, it, a, asked_avail=asked_avail, asked_price=asked_price)
             LOCKED[sid] = a
             # Запомнить запрошенное количество — чтобы на «да» озвучить итог, а не уйти молча.
             PENDING[sid] = {"quantity_pieces": qn, "packs": pk} if (qn or pk) else {}
-            return (f"Точно такого размера сейчас нет. Есть близкое — {_full_ref(a)}, "
-                    f"{_price_phrase(a)}. Подойдёт?")
-        return ("Точно такого в наличии нет. Подскажите количество — передам запрос "
-                "в сметный отдел, посчитают под заказ.")
+            price_part = f", {_price_phrase(a)}" if asked_price else ""
+            return f"Точно такого размера сейчас нет. Есть близкое — {_full_ref(a)}{price_part}. Подойдёт?"
+        return _AVAIL_UNKNOWN_PHRASE
 
     # Запрошено особое исполнение (профилированный/сухой/антисептир...) — а его в наличии нет
     # среди точных совпадений: НЕ подменяем молча, предлагаем имеющийся вариант как близкое.
-    desc_req = [w for w in _DESC_WORDS if w in (it.get("raw") or "").lower()]
-    if desc_req:
-        with_desc = [p for p in exact if all(w[:7] in (p.get("name") or "").lower() for w in desc_req)]
+    raw_low = (it.get("raw") or "").lower()
+    natural = _wants_natural_moisture(raw_low)
+    desc_req = _desc_words_in(raw_low)
+    if desc_req or natural:
+        with_desc = exact
+        if natural:
+            with_desc = [p for p in with_desc if "сух" not in (p.get("name") or "").lower()]
+        if desc_req:
+            with_desc = [p for p in with_desc if all(w[:7] in (p.get("name") or "").lower() for w in desc_req)]
         if not with_desc:
-            raw_low = (it.get("raw") or "").lower()
             a = _confident_pick(it, exact)
             LOCKED[sid] = a
             qn = catalog._to_num(it.get("quantity_pieces"))
             pk = catalog._to_num(it.get("packs"))
             PENDING[sid] = {"quantity_pieces": qn, "packs": pk} if (qn or pk) else {}
-            # Пропитка биозащитой/огнезащитой: готового нет, но делаем за 1-2 дня после заказа.
+            # Пропитка биозащитой/огнезащитой — фиксированный ответ (Артём 22.09.2026), не вопрос
+            # наличия: всегда «2-3 дня, под заказ», независимо от того, спросили про наличие или нет.
             if any(t in raw_low for t in _TREATMENT_WORDS):
-                return (f"Готового в такой обработке сейчас нет, но мы наносим биозащиту или огнезащиту "
-                        f"за один-два дня после заказа. Базовый материал — {_full_ref(a)} — в наличии. "
+                return (f"Такую обработку — антисептирование или огнезащиту — мы делаем за два-три дня "
+                        f"после заказа, это под заказ. Базовый материал — {_full_ref(a)} — в наличии. "
                         f"Оформить заявку с обработкой?")
-            return (f"Именно в таком исполнении этого размера сейчас нет. Есть {_full_ref(a)}, "
-                    f"{_price_phrase(a)}. Подойдёт?")
+            if not (asked_avail or asked_price):
+                return ("Поняла, записала пожелание по этому исполнению — менеджер уточнит "
+                        "по наличию и перезвонит с конкретикой. Что-то ещё?")
+            price_part = f", {_price_phrase(a)}" if asked_price else ""
+            if natural:
+                return (f"Естественной влажности этого размера сейчас нет, только сухая. "
+                        f"Есть {_full_ref(a)}{price_part}. Подойдёт?")
+            return f"Именно в таком исполнении этого размера сейчас нет. Есть {_full_ref(a)}{price_part}. Подойдёт?"
         exact = with_desc
 
     # Разные ТИПЫ товара одного размера (доска/планкен/штакетник) без сигнала выбора → LLM уточнит назначение.
@@ -737,7 +903,7 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
     p = _locked_or_pick(sid, it, exact)
     if not p:
         return None
-    return _present(sid, it, p)
+    return _present(sid, it, p, asked_avail=asked_avail, asked_price=asked_price)
 
 
 async def build_reply(session_id: str, transcript: str) -> str:
@@ -868,7 +1034,8 @@ async def build_reply(session_id: str, transcript: str) -> str:
                 direct_reply = ("Точную стоимость доставки по этому пункту рассчитает менеджер. "
                                 "На какой день вам нужна доставка?")
     elif stage == "await_date":
-        dstate.update({"date": transcript.strip(), "stage": "sms_offered"})
+        resolved_date = _resolve_relative_date(transcript)
+        dstate.update({"date": transcript.strip(), "date_resolved": resolved_date, "stage": "sms_offered"})
         amt = dstate.get("amount")
         place = dstate.get("place", "")
         # Пункт зачитываем в сводке ТОЛЬКО если он распознан (zone != None). Иначе это мог быть
@@ -876,13 +1043,19 @@ async def build_reply(session_id: str, transcript: str) -> str:
         place_ok = dstate.get("zone") is not None and place
         loc = f"в {place}" if place_ok else "по указанному адресу"
         cost_part = f", стоимость доставки {_amt(amt)}" if amt else ", стоимость доставки рассчитает менеджер"
-        direct_reply = (f"Записала: доставка {transcript.strip()} {loc}{cost_part}. "
+        # «послезавтра»/«в пятницу» и т.п. — распознаём в реальную календарную дату (МСК), а не
+        # только повторяем слова клиента (иначе заявка в сметный отдел уходит без точной даты).
+        date_part = f"{transcript.strip()} ({resolved_date})" if resolved_date else transcript.strip()
+        direct_reply = (f"Записала: доставка {date_part} {loc}{cost_part}. "
                         f"Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?")
     else:
         # Голое подтверждение («да, давайте») к предложенной замене с уже названным количеством →
         # озвучиваем ИТОГ детерминированно (иначе LLM подтвердит без суммы — баг «итог не озвучен»).
         affirm = any(w in low for w in ("да", "давай", "подойд", "хорош", "согла", "беру", "годит", "устра", "ага", "угу")) and len(low) < 30
         no_new_item = not any((it.get("text") or "").strip() for it, _ in per_item)
+        # Прямой вопрос про наличие/цену (разворот Артёма 22.09.2026) — иначе Вера в них не лезет.
+        asked_avail = _asks_availability(low)
+        asked_price = _asks_price(low)
         det = None
         if affirm and no_new_item and LOCKED.get(sid) and PENDING.get(sid):
             p = LOCKED[sid]
@@ -890,15 +1063,15 @@ async def build_reply(session_id: str, transcript: str) -> str:
                      "quantity_pieces": PENDING[sid].get("quantity_pieces"),
                      "packs": PENDING[sid].get("packs")}
             if catalog.compute_total(p, synth):
-                det = _present(sid, synth, p)
+                det = _present(sid, synth, p, asked_avail=asked_avail, asked_price=asked_price)
         # Иначе — обычный детерминированный ход: одиночная определённая позиция считается кодом.
         if det is None:
-            det = _product_reply(sid, per_item)
+            det = _product_reply(sid, per_item, asked_avail=asked_avail, asked_price=asked_price)
         if det is not None:
             direct_reply = det
         else:
             # Мультизаказ / уточнение / разные типы — отвечает LLM (без цифр цен, см. промпт).
-            context_block = _build_context_block(per_item)
+            context_block = _build_context_block(per_item, asked_avail=asked_avail, asked_price=asked_price)
             for it, products in per_item:
                 _record_order_item(sid, it, products)
 
