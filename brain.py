@@ -183,12 +183,16 @@ _CYL_WORDS = ("столб", "бревн", "брёвн", "опор", "свая", 
 def _pick_product(products: list[dict[str, Any]], it: dict[str, Any]) -> dict[str, Any] | None:
     """Выбрать лучший вариант среди совпадений одного размера.
 
+    Сначала уважаем явно названный клиентом сорт (_grade_filter) — иначе, при нескольких
+    сортах одного размера, дефолт «первый по остатку» может подсунуть самый залежавшийся
+    (обычно ВС) вместо запрошенного (баг Артёма 23.09 — рейка/доска игнорировали сорт АВ).
     Если клиент назвал количество и есть варианты с ДОСТАТОЧНЫМ остатком — берём из них
     самый дешёвый (не гоним в «нехватку» из-за другого варианта с малым остатком).
     Иначе — первый по умолчанию (сортировка поиска = по убыванию остатка).
     """
     if not products:
         return None
+    products = _grade_filter(it, products)
     req = catalog._to_num(it.get("quantity_pieces"))
     if req:
         enough = [p for p in products if not p.get("pack_count") and (p.get("count") or 0) >= req]
@@ -258,7 +262,9 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
         # клиенту — обычный сценарий сметного отдела (см. ветку "иначе не подошло" в промпте).
         no_params = not any(it.get(k) for k in ("thickness_mm", "width_mm", "length_mm", "diameter_mm", "grade", "target_m3", "quantity_pieces", "packs"))
         # Есть ли вообще сорт у найденных позиций — чтобы Вера не спрашивала про сорт там, где его нет.
-        has_grade = any((p.get("sort") or "").strip() for p in products) if products else False
+        # (было: смотрели только в поле sort — для рейки/доски оно пустое, сорт зашит в название,
+        # бот считал что сорта нет вообще и не только не спрашивал, а активно игнорировал названный клиентом)
+        has_grade = any(_product_grade(p) for p in products) if products else False
         has_qty = any(it.get(k) for k in ("quantity_pieces", "packs", "target_m3"))
         if products and len(products) > 3 and no_params:
             narrow_by = "размер и влажность" if not has_grade else "размер, влажность или сорт"
@@ -496,14 +502,30 @@ def _full_ref(p: dict[str, Any]) -> str:
     return f"{base}, {', '.join(dims)}" if dims else base
 
 
+_GRADE_TOKENS = {"А", "Б", "АБ", "АВ", "АВС", "В", "ВС", "С", "Б/Ц", "БС", "БСК", "Э"}
+_NAME_GRADE_RE = re.compile(r"СОРТ\s+([А-Я/]+)")
+
+
+def _product_grade(p: dict[str, Any]) -> str:
+    """Сорт товара: сперва поле `sort` (вагонка и т.п.), а если пусто — токен «сорт X» из
+    названия (рейка/доска — у них сорт зашит в текст, поле sort всегда NULL, баг Артёма 23.09:
+    Вера считала, что у рейки/доски сорта нет вообще, и игнорировала явно названный клиентом)."""
+    s = (p.get("sort") or "").strip().upper()
+    if s:
+        return s
+    m = _NAME_GRADE_RE.search((p.get("name") or "").upper())
+    if m and m.group(1) in _GRADE_TOKENS:
+        return m.group(1)
+    return ""
+
+
 def _grade_filter(it: dict[str, Any], products: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Сорт у некоторых товаров (евровагонка) зашит в НАЗВАНИЕ, а не в поле sort. Если клиент
-    назвал сорт — оставляем товары с этим сортом (как отдельным токеном в названии). Если таких
-    нет — не блокируем продажу, возвращаем исходный список."""
+    """Если клиент назвал сорт — оставляем товары с этим сортом (поле sort ИЛИ вшитый в
+    название). Если таких нет — не блокируем продажу, возвращаем исходный список."""
     g = (it.get("grade") or "").strip().upper()
     if not g:
         return products
-    matched = [p for p in products if g in (p.get("name") or "").upper().split()]
+    matched = [p for p in products if _product_grade(p) == g]
     return matched or products
 
 
