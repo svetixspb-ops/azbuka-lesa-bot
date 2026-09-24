@@ -494,11 +494,12 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
                 raw = forced
     except (Exception, asyncio.TimeoutError) as e:
         log.warning("run_tools failed/timeout: %s", e)
-        history.pop()  # не сохраняем повисшую реплику
+        history.pop()  # не сохраняем повисшую реплику в контексте модели
+        fallback = ("Извините, ответ задержался. Повторите, пожалуйста, вопрос — "
+                    "или оставьте телефон, и менеджер свяжется.")
+        _log_turn(session_id, "assistant", fallback)  # иначе дайджест/аудит видит "нет ответа"
         asyncio.create_task(tyos_lead.alert_failure(session_id, str(e)))
-        return {"reply": "Извините, ответ задержался. Повторите, пожалуйста, вопрос — "
-                         "или оставьте телефон, и менеджер свяжется.",
-                "chips": [], "lead": None, "actions": []}
+        return {"reply": fallback, "chips": [], "lead": None, "actions": []}
     if not raw:
         raw = "Секунду, собираю заказ. Уточните, пожалуйста, последнюю позицию."
 

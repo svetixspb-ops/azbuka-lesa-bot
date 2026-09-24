@@ -40,7 +40,7 @@ def load(date_from: datetime.date | None, date_to: datetime.date | None):
             if date_to and dt.date() > date_to:
                 continue
             sid = str(d.get("session_id", "?"))
-            if sid.startswith("navi-test-"):  # тестовые диалоги Нави — не путать с реальными клиентами
+            if not sid.startswith(("web-", "max-", "vk-")):  # только реальные клиентские каналы, не техпинги/тесты
                 continue
             sessions.setdefault(sid, []).append((dt, d.get("role"), d.get("content", "")))
     return sessions

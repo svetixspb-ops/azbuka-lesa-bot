@@ -218,16 +218,26 @@ def search(
 
 
 def search_loose(text: str, limit: int = 8) -> list[dict[str, Any]]:
-    """Свободный поиск без размеров: токены из запроса через LIKE."""
+    """Свободный поиск без размеров: токены из запроса через LIKE.
+
+    Если по ВСЕМ токенам сразу ничего не нашлось (незнакомое/редкое слово исполнения,
+    например «завальцованный», которого нет ни в одном названии) — пробуем без хвостовых
+    токенов, чтобы всё равно найти товар того же типа для альтернативы (баг 2026-09:
+    клиента без вариантов футболили в сметный отдел вместо ближайшего по размеру)."""
     tokens = [t for t in _tokens(text) if t not in _GENERIC_MODIFIERS]
     if not tokens:
         return []
-    sql_parts = ["available=1 AND count > 0"]
-    params: list[Any] = []
-    for t in tokens:
-        sql_parts.append("name_lower LIKE ?")
-        params.append(f"%{_stem_token(t)}%")
-    return _do_search(sql_parts, params, limit)
+    for n in range(len(tokens), 0, -1):
+        subset = tokens[:n]
+        sql_parts = ["available=1 AND count > 0"]
+        params: list[Any] = []
+        for t in subset:
+            sql_parts.append("name_lower LIKE ?")
+            params.append(f"%{_stem_token(t)}%")
+        rows = _do_search(sql_parts, params, limit)
+        if rows:
+            return rows
+    return []
 
 
 def piece_volume_m3(thickness_mm: float | None, width_mm: float | None, length_mm: float | None,
