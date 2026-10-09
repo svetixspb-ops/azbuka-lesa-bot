@@ -126,6 +126,19 @@ def _record_order_item(sid: str, it: dict[str, Any], products: list[dict[str, An
         pieces = int(n_packs * pack) if n_packs else None
     else:
         pieces = int(qty) if qty else (math.ceil(target / unit_vol) if (target and unit_vol) else None)
+    # Поправка клиента («не прямой, а скошенный») не должна ОСТАВЛЯТЬ в заявке
+    # обе позиции: записанный ранее товар с конфликтующим профилем вытесняем
+    # (звонок Артёма 09.10.2026).
+    def _size_tag(nm: str) -> str:
+        m = re.search(r"\d+\s*[хx]\s*\d+(?:\s*[хx]\s*\d+)?", nm.lower())
+        return re.sub(r"\s+", "", m.group()) if m else ""
+
+    new_size = _size_tag(p["name"])
+    for old_name in [k for k in ORDER[sid]
+                     if k != p["name"]
+                     and _size_tag(k) == new_size          # тот же размер, иначе это другая позиция заказа
+                     and _profile_conflict(p["name"].lower(), k.lower())]:
+        ORDER[sid].pop(old_name, None)
     ORDER[sid][p["name"]] = {
         "pieces": pieces,
         "unit_vol": unit_vol,
@@ -253,6 +266,18 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
             hints.append(f"нужно {it['packs']} уп")
         hint_s = f" — {', '.join(hints)}" if hints else ""
         blocks.append(f"\nПозиция {i}: «{label}»{hint_s}")
+        # Товар найден только после выбрасывания слов из запроса — значит точного
+        # совпадения в каталоге нет, это лишь похожая позиция. Говорим об этом прямо,
+        # иначе Вера фиксирует её как заказанную (звонок Артёма 09.10.2026: клиент
+        # просил планкен СКОШЕННЫЙ, записан был планкен ПРЯМОЙ).
+        dropped = next((p["loose_dropped"] for p in products if p.get("loose_dropped")), None)
+        if dropped:
+            miss = ", ".join(f"«{w}»" for w in dropped)
+            blocks.append(f"  — ВНИМАНИЕ: точного совпадения по {miss} в каталоге НЕ найдено. "
+                          f"Товары ниже — ПОХОЖИЕ, а не то, что просил клиент. НЕ записывай их "
+                          f"в заявку как заказанное и НЕ говори «записала». Скажи честно: точно "
+                          f"такого в каталоге не вижу, предложи похожее как альтернативу "
+                          f"(«есть вот такое — подойдёт?») либо передай позицию в сметный отдел.")
         # Слишком много совпадений И вообще без параметров → НЕ зачитываем список
         # (для голоса длинный перечень = плохо), просим уточнить ОДИН параметр.
         # Если вариантов и так МАЛО (≤3) — уточнять нечего, выбирать не из чего: показываем
@@ -701,12 +726,37 @@ def _nearest_alt(it: dict[str, Any], pool: list[dict[str, Any]]) -> dict[str, An
     return sorted(pool, key=key)[0]
 
 
+# Взаимоисключающие профили одного товара: назвал один — товар с другим НЕ подходит.
+# Звонок Артёма 09.10.2026: клиент трижды сказал «планкен скошенный», но «скошен»/«прям»
+# не были исполнениями из _DESC_WORDS, конфликта не возникало — и _continues_locked
+# держался уже зафиксированного «Планкен прямой», повторяя «Записала: прямой» на каждую
+# поправку. Для raw держим точные формы («прямо сейчас» ≠ «прямой планкен»).
+_PROFILE_GROUPS = (
+    (("скошен", r"скошен"),
+     ("прям",   r"прям(?:ой|ого|ом|ым|ая|ую|ое|ые|ых)")),
+)
+
+
+def _profile_conflict(raw: str, name: str) -> bool:
+    """Клиент назвал профиль из группы, а у товара профиль ДРУГОЙ из той же группы."""
+    for group in _PROFILE_GROUPS:
+        asked = [sub for sub, pat in group if re.search(pat, raw)]
+        if not asked:
+            continue
+        others = [sub for sub, _ in group if sub not in asked]
+        if any(o in name for o in others) and not any(a in name for a in asked):
+            return True
+    return False
+
+
 def _desc_conflict(it: dict[str, Any], p: dict[str, Any]) -> bool:
     """Клиент назвал исполнение (сухая/антисептир…), которого у товара p НЕТ — нельзя его подсовывать."""
     raw = (it.get("raw") or "").lower()
     name = (p.get("name") or "").lower()
     if _wants_natural_moisture(raw) and "сух" in name:
         return True  # просил не сухую/естественной влажности — сухая p не подходит
+    if _profile_conflict(raw, name):
+        return True
     return any(w[:5] not in name for w in _desc_words_in(raw))
 
 
