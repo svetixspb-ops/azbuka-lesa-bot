@@ -24,6 +24,7 @@ session_id (id звонка) — Вера помнит контекст внут
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -106,6 +107,33 @@ async def handle_reset(request: web.Request) -> web.Response:
 _TTS_CACHE: dict[str, bytes] = {}        # text → WAV; маленький LRU для повторов (заполнитель)
 _TTS_CACHE_MAX = 64
 
+# Фразы, которые звучат в КАЖДОМ звонке слово в слово: приветствие, вступление после
+# имени, заполнители. Их синтез держим в кэше постоянно и не вытесняем — иначе за
+# активный день их выбивают реплики по товарам, и клиент снова ждёт секунду тишины
+# (жалоба Артёма 09.10.2026 на паузу после имени). Прогреваются на старте.
+_TTS_PINNED: tuple[str, ...] = (
+    "Здравствуйте! Компания Азбука Леса, меня зовут Вера. Как могу к вам обращаться?",
+    "Сейчас наши сотрудники не могут ответить, поэтому я приму вашу заявку, "
+    "сделаю расчёт и передам в сметный отдел на подтверждение заказа.",
+    "Уверена, у нас есть всё, что вам нужно.",
+    "Расскажите, какие материалы вам нужны, — я запишу.",
+    "Секунду.", "Минутку.", "Сейчас посмотрю.", "Так, смотрю.", "Один момент.",
+    "Алло, вы меня слышите?",
+)
+
+
+async def _warm_tts_cache() -> None:
+    """Прогреть постоянные фразы, чтобы их не ждал первый же дозвонившийся."""
+    for text in _TTS_PINNED:
+        if text in _TTS_CACHE:
+            continue
+        try:
+            _TTS_CACHE[text] = await speechkit.tts_wav(text)
+        except Exception as e:
+            log.warning("прогрев TTS не удался (%r): %s", text[:30], e)
+            return
+    log.info("TTS прогрет: %d постоянных фраз", len(_TTS_PINNED))
+
 
 async def handle_tts(request: web.Request) -> web.Response:
     """GET /tts?text=...&key=... → WAV (alena/neutral/+8%).
@@ -128,7 +156,10 @@ async def handle_tts(request: web.Request) -> web.Response:
             log.exception("tts_wav failed: %s", e)
             return web.json_response({"error": "tts_failed", "detail": str(e)}, status=502)
         if len(_TTS_CACHE) >= _TTS_CACHE_MAX:
-            _TTS_CACHE.pop(next(iter(_TTS_CACHE)))
+            # Вытесняем самую старую НЕзакреплённую запись — постоянные фразы остаются.
+            victim = next((k for k in _TTS_CACHE if k not in _TTS_PINNED), None)
+            if victim is not None:
+                _TTS_CACHE.pop(victim)
         _TTS_CACHE[text] = wav
     return web.Response(body=wav, content_type="audio/x-wav",
                         headers={"Cache-Control": "public, max-age=3600"})
@@ -200,6 +231,11 @@ def build_app() -> web.Application:
     app.router.add_get("/ambiance.wav", handle_ambiance)
     app.router.add_post("/reset", handle_reset)
     app.router.add_post("/voice", handle_voice)
+
+    async def _on_startup(_: web.Application) -> None:
+        asyncio.create_task(_warm_tts_cache())   # фоном, старт сервиса не задерживаем
+
+    app.on_startup.append(_on_startup)
     return app
 
 

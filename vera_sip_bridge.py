@@ -35,6 +35,7 @@ import io
 import itertools
 import logging
 import os
+import re
 import struct
 import time
 import wave
@@ -65,6 +66,11 @@ FRAME_BYTES = FRAME_SAMPLES * 2                  # 320
 
 # ── Тайминги диалога (перенесены из voximplant_scenario.js) ─────────────────
 PAUSE_MS = 800            # тишина, после которой считаем, что клиент договорил
+PAUSE_MS_FIRST = 550      # первый ход — ответ на «как могу к вам обращаться?»: это имя,
+                          # одно-два слова, ждать 800 мс незачем (Артём 09.10.2026 —
+                          # «после того как я себя назвал слишком долгая пауза»).
+                          # Короче только здесь: в середине разговора урезанная пауза
+                          # резала бы клиента на полуслове.
 SPEECH_START_FRAMES = 3   # 60 мс речи — начало высказывания
 MIN_SPEECH_FRAMES = 15    # короче 300 мс — щелчок/шум, не реплика
 MAX_UTTERANCE_S = 30      # предохранитель: лимит Yandex STT v1 — 1 МБ (~65 с на 8 кГц)
@@ -88,6 +94,27 @@ KIND_UUID = 0x01
 KIND_DTMF = 0x02
 KIND_AUDIO = 0x10
 KIND_ERROR = 0xFF
+
+
+_SENT_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _tts_chunks(text: str) -> list[str]:
+    """Реплика → куски по предложениям для пошагового синтеза.
+
+    Очень короткие куски («Да.») склеиваем со следующим — отдельный запрос в TTS ради
+    одного слова даёт слышимый шов на стыке.
+    """
+    out: list[str] = []
+    for sent in _SENT_SPLIT.split((text or "").strip()):
+        sent = sent.strip()
+        if not sent:
+            continue
+        if out and len(out[-1]) < 12:
+            out[-1] = f"{out[-1]} {sent}"
+        else:
+            out.append(sent)
+    return out
 
 
 def _vad_factory():
@@ -195,14 +222,36 @@ class Call:
             if delay > 0:
                 await asyncio.sleep(delay)
 
+    async def _tts_pcm(self, text: str) -> bytes:
+        r = await self.http.get(f"{API_BASE}/tts", params={"text": text, "key": API_KEY},
+                                timeout=30)
+        r.raise_for_status()
+        return _wav_to_slin8k(r.content)
+
     async def _play_text(self, text: str) -> None:
+        """Озвучить реплику ПО ПРЕДЛОЖЕНИЯМ: начинаем говорить, как только готово первое,
+        остальные синтезируем фоном, пока звучит предыдущее.
+
+        Раньше ждали синтеза ВСЕЙ реплики — на длинном вступлении после имени это
+        давало около секунды мёртвой тишины сверх распознавания (жалоба Артёма 09.10.2026).
+        Первое предложение короткое («Очень приятно, Артём!»), синтез ~0.2 с — клиент
+        слышит ответ почти сразу, а длинный хвост догружается незаметно."""
+        parts = _tts_chunks(text)
+        if not parts:
+            return
+        nxt: asyncio.Task | None = asyncio.create_task(self._tts_pcm(parts[0]))
         try:
-            r = await self.http.get(f"{API_BASE}/tts", params={"text": text, "key": API_KEY},
-                                    timeout=30)
-            r.raise_for_status()
-            await self._play_pcm(_wav_to_slin8k(r.content))
+            for i in range(len(parts)):
+                pcm = await nxt
+                # Следующий кусок синтезируем ДО того, как начать играть текущий.
+                nxt = (asyncio.create_task(self._tts_pcm(parts[i + 1]))
+                       if i + 1 < len(parts) else None)
+                await self._play_pcm(pcm)
         except Exception as e:
             log.error("[%s] озвучка не удалась (%r): %s", self.session_id, text[:40], e)
+        finally:
+            if nxt is not None:
+                nxt.cancel()
 
     # ── единственная «занятость» звонка: Вера говорит ──────────────────────
     def _start(self, coro) -> None:
@@ -315,7 +364,8 @@ class Call:
         elif self._in_speech:
             self._silence += 1
             self._chunks.append(frame)  # хвост тишины помогает распознаванию
-            if self._silence * FRAME_MS >= PAUSE_MS:
+            pause_ms = PAUSE_MS_FIRST if self.turns == 0 else PAUSE_MS
+            if self._silence * FRAME_MS >= pause_ms:
                 pcm = b"".join(self._chunks)
                 enough = self._voiced >= MIN_SPEECH_FRAMES
                 self._reset_utterance()
