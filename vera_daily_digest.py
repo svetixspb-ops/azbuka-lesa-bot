@@ -144,6 +144,41 @@ def hard_stats(sessions) -> list[str]:
     return lines
 
 
+# Текст звонка весит единицы килобайт (разговор на 5 ходов — около 4.5 КБ), но журнал
+# растёт бессрочно, а на сервере тесно. Аудио НЕ храним принципиально (решение Светы
+# 09.10.2026): час телефонного разговора в сыром виде — под 60 МБ, это забьёт диск за
+# недели. Записи голоса, если понадобятся, живут на стороне телефонии Mango.
+KEEP_DAYS = 180
+
+
+def rotate_journal(keep_days: int = KEEP_DAYS) -> int:
+    """Выбросить из журнала записи старше keep_days. Возвращает, сколько удалено."""
+    cutoff = (datetime.datetime.now(MSK) - datetime.timedelta(days=keep_days)).date()
+    try:
+        with open(DIALOGS, encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return 0
+    keep = []
+    dropped = 0
+    for line in lines:
+        try:
+            dt = datetime.datetime.fromisoformat(json.loads(line).get("ts", "")).astimezone(MSK)
+        except (json.JSONDecodeError, ValueError):
+            keep.append(line)          # непонятную строку не трогаем
+            continue
+        if dt.date() < cutoff:
+            dropped += 1
+        else:
+            keep.append(line)
+    if dropped:
+        tmp = DIALOGS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(keep)
+        os.replace(tmp, DIALOGS)       # атомарно: бот пишет в этот же файл
+    return dropped
+
+
 def _recipients() -> list[str]:
     raw = (os.environ.get("VERA_DIGEST_CHAT_IDS") or os.environ.get("ADMIN_IDS") or "")
     return [cid.strip() for cid in raw.split(",") if cid.strip()]
@@ -239,6 +274,10 @@ async def main() -> None:
         f"zvonki_vera_{target_date.isoformat()}.txt", dialogs_full,
         caption=f"Расшифровки звонков Веры за {date_label}")
     print("Файл с расшифровками отправлен:" if ok_doc else "Файл НЕ отправлен", ok_doc)
+
+    dropped = rotate_journal()
+    if dropped:
+        print(f"Журнал подрезан: удалено {dropped} записей старше {KEEP_DAYS} дней.")
 
 
 if __name__ == "__main__":
