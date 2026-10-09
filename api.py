@@ -28,6 +28,7 @@ import asyncio
 import base64
 import logging
 import os
+import urllib.parse
 from pathlib import Path
 
 from aiohttp import web
@@ -122,7 +123,14 @@ async def handle_callmeta(request: web.Request) -> web.Response:
     if peer not in ("127.0.0.1", "::1"):
         _check_key(request)
     uuid = (request.query.get("uuid") or "").strip()
-    number = (request.query.get("from") or "").strip()
+    # Номер читаем из СЫРОЙ строки запроса: Asterisk не кодирует значения, и «+7951…»
+    # уходит буквальным плюсом — обычный разбор query превратил бы его в пробел.
+    number = ""
+    for pair in (request.rel_url.raw_query_string or "").split("&"):
+        key, _, val = pair.partition("=")
+        if key == "from":
+            number = urllib.parse.unquote(val).strip()   # unquote не трогает «+»
+            break
     if not uuid:
         raise web.HTTPBadRequest(text='{"error":"uuid required"}', content_type="application/json")
     brain.set_caller(f"sip-{uuid}", number)
