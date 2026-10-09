@@ -12,6 +12,8 @@ __pycache__/
 *.log
 leads.jsonl
 dialogs.jsonl
+vera_dialogs.jsonl
+zvonki_vera_*.txt
 stt_log.jsonl
 handoffs.json
 liveliness_result.txt

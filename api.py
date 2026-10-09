@@ -83,6 +83,7 @@ async def handle_chat(request: web.Request) -> web.Response:
         reply = await brain.build_reply(session_id, text)
     except Exception as e:
         log.exception("build_reply failed: %s", e)
+        brain._log_turn(session_id, "error", f"brain_failed: {e}")  # сбой тоже виден в журнале звонков
         return web.json_response({"error": "brain_failed", "detail": str(e)}, status=502)
     # Отделяем служебный маркер завершения — телефония по end=true кладёт трубку.
     reply, end = brain.split_end(reply)
@@ -175,6 +176,7 @@ async def handle_voice(request: web.Request) -> web.Response:
         reply = await brain.build_reply(session_id, transcript)
     except Exception as e:
         log.exception("build_reply failed: %s", e)
+        brain._log_turn(session_id, "error", f"brain_failed: {e}")  # сбой тоже виден в журнале звонков
         return web.json_response({"transcript": transcript, "error": "brain_failed", "detail": str(e)}, status=502)
     # Как в /chat: отделяем служебный маркер завершения — телефония по end=true кладёт трубку.
     reply, end = brain.split_end(reply)

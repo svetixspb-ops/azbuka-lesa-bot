@@ -12,7 +12,9 @@ extract → поиск по каждой позиции → контекст д�
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -26,6 +28,45 @@ import prompts
 log = logging.getLogger("vera-brain")
 
 _MSK = timezone(timedelta(hours=3))
+
+# Журнал звонков: каждая реплика клиента, ответ Веры и что она нашла в каталоге.
+# Нужен, чтобы разбирать косяки постфактум — раньше это жило только в systemd-журнале,
+# который чистится (просьба Артёма 09.10.2026 «иметь доступ к прослушиванию диалогов»).
+_DIALOGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vera_dialogs.jsonl")
+
+
+def _log_turn(session_id: str, role: str, content: str, **extra: Any) -> None:
+    """Дописать строку в журнал звонков. Журнал НИКОГДА не роняет ответ клиенту."""
+    try:
+        rec = {
+            "ts": datetime.now(_MSK).isoformat(timespec="seconds"),
+            "session_id": str(session_id),
+            "role": role,
+            "content": content,
+        }
+        rec.update(extra)
+        with open(_DIALOGS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("dialog log failed: %s", e)
+
+
+def _log_found(session_id: str, per_item: list[tuple[dict[str, Any], list[dict[str, Any]]]]) -> None:
+    """Что Вера поняла из реплики и что нашла по этому в каталоге — для разбора поиска."""
+    rows = []
+    for it, products in per_item:
+        if not (it.get("text") or "").strip():
+            continue
+        rows.append({
+            "запрос": it.get("raw") or it.get("text"),
+            "понято": {k: it.get(k) for k in ("text", "thickness_mm", "width_mm", "length_mm",
+                                              "species", "grade", "quantity_pieces", "packs")
+                       if it.get(k) is not None},
+            "найдено": [p.get("name") for p in products[:5]],
+            "неточно": next((p["loose_dropped"] for p in products if p.get("loose_dropped")), None),
+        })
+    if rows:
+        _log_turn(session_id, "search", "", items=rows)
 _MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня",
               "июля", "августа", "сентября", "октября", "ноября", "декабря")
 _WEEKDAYS_RU = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
@@ -1001,8 +1042,14 @@ async def build_reply(session_id: str, transcript: str) -> str:
                               "Уверена, у нас есть всё, что вам нужно. Расскажите, какие материалы вам нужны, — я запишу.")
             HISTORY[sid].append({"role": "user", "content": transcript})
             HISTORY[sid].append({"role": "assistant", "content": answer})
+            _log_turn(sid, "user", transcript)
+            _log_turn(sid, "assistant", answer)
             return answer
 
+    # Реплику клиента журналим ДО вызовов LLM: если провайдер отвалится и ответ
+    # уйдёт фолбэком из обёртки, в журнале всё равно будет видно, что клиент сказал
+    # (урок 25 плейбука — «наблюдаемая тишина» не должна путаться с настоящей).
+    _log_turn(sid, "user", transcript)
     try:
         q = await llm.extract_query(transcript, history=HISTORY[sid][-HISTORY_MAX:])
     except Exception as e:
@@ -1012,6 +1059,7 @@ async def build_reply(session_id: str, transcript: str) -> str:
     log.info("sid=%s items=%s", sid, items)
 
     per_item = [(it, _search_item(it)) for it in items]
+    _log_found(sid, per_item)
     low = transcript.lower()
     dstate = DELIVERY[sid]
     stage = dstate.get("stage")
@@ -1162,4 +1210,5 @@ async def build_reply(session_id: str, transcript: str) -> str:
     HISTORY[sid].append({"role": "user", "content": transcript})
     HISTORY[sid].append({"role": "assistant", "content": clean_for_history})
     HISTORY[sid] = HISTORY[sid][-HISTORY_MAX:]
+    _log_turn(sid, "assistant", clean_for_history)
     return answer
