@@ -13,6 +13,7 @@ __pycache__/
 leads.jsonl
 dialogs.jsonl
 vera_dialogs.jsonl
+vera_leads.jsonl
 zvonki_vera_*.txt
 stt_log.jsonl
 handoffs.json

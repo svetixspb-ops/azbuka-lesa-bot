@@ -39,6 +39,7 @@ load_dotenv(ROOT / ".env")
 import brain  # noqa: E402
 import catalog  # noqa: E402
 import speechkit  # noqa: E402
+import vera_lead  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 log = logging.getLogger("vera-api")
@@ -100,8 +101,33 @@ async def handle_reset(request: web.Request) -> web.Response:
     session_id = str(data.get("session_id") or "").strip()
     if not session_id:
         raise web.HTTPBadRequest(text='{"error":"session_id required"}', content_type="application/json")
+    # Звонок закончился — собираем заявку менеджеру ДО очистки контекста (просьба
+    # Артёма 09.10.2026). Снимок синхронный, сводка у модели и отправка — фоном:
+    # мост ждёт /reset, а держать его ради доставки в Telegram незачем.
+    snap = vera_lead.snapshot(session_id)
     brain.reset(session_id)
+    if snap:
+        asyncio.create_task(vera_lead.deliver(snap))
     return web.json_response({"ok": True})
+
+
+async def handle_callmeta(request: web.Request) -> web.Response:
+    """GET /callmeta?uuid=...&from=...  — телефония сообщает, с какого номера звонят.
+
+    Зовётся из dialplan (func_curl) ДО AudioSocket, поэтому номер уже известен к
+    первому слову клиента. С localhost ключ не требуем: dialplan не должен хранить
+    секреты, а порт 8090 снаружи и так закрыт ключом.
+    """
+    peer = request.remote or ""
+    if peer not in ("127.0.0.1", "::1"):
+        _check_key(request)
+    uuid = (request.query.get("uuid") or "").strip()
+    number = (request.query.get("from") or "").strip()
+    if not uuid:
+        raise web.HTTPBadRequest(text='{"error":"uuid required"}', content_type="application/json")
+    brain.set_caller(f"sip-{uuid}", number)
+    log.info("звонок sip-%s с номера %s", uuid, number or "(не определился)")
+    return web.Response(text="ok")
 
 
 _TTS_CACHE: dict[str, bytes] = {}        # text → WAV; маленький LRU для повторов (заполнитель)
@@ -230,6 +256,7 @@ def build_app() -> web.Application:
     app.router.add_get("/tts", handle_tts)
     app.router.add_get("/ambiance.wav", handle_ambiance)
     app.router.add_post("/reset", handle_reset)
+    app.router.add_get("/callmeta", handle_callmeta)
     app.router.add_post("/voice", handle_voice)
 
     async def _on_startup(_: web.Application) -> None:

@@ -112,6 +112,44 @@ LOCKED: dict[str, dict[str, Any]] = {}
 # Чтобы на голое «да, давайте» (без повтора числа) озвучить ИТОГ, а не молча уйти к доставке.
 PENDING: dict[str, dict[str, Any]] = {}
 
+# Имя клиента и номер, с которого он звонит — для заявки менеджеру (просьба Артёма
+# 09.10.2026: «должно приходить имя, телефон, с которого человек звонил, и кратко
+# о чём разговор»). Номер кладёт телефония через GET /callmeta ещё до первого слова.
+NAME: dict[str, str] = {}
+CALLER: dict[str, str] = {}
+
+
+def set_caller(session_id: str, number: str) -> None:
+    """Запомнить номер звонящего (Caller ID из Asterisk) для этой сессии."""
+    num = (number or "").strip()
+    if num and num.lower() not in ("unknown", "anonymous", "<unknown>"):
+        CALLER[str(session_id)] = num
+
+
+def session_transcript(session_id: str) -> list[tuple[str, str]]:
+    """Весь разговор этой сессии из журнала звонков — [(роль, текст), ...].
+
+    Берём из файла, а не из HISTORY: история обрезана до последних ходов, а для
+    сводки менеджеру нужен разговор целиком.
+    """
+    sid = str(session_id)
+    out: list[tuple[str, str]] = []
+    try:
+        with open(_DIALOGS_PATH, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if str(d.get("session_id")) != sid:
+                    continue
+                role = d.get("role")
+                if role in ("user", "assistant"):
+                    out.append((role, d.get("content") or ""))
+    except FileNotFoundError:
+        pass
+    return out
+
 # Маркер завершения разговора: мозг ставит его в прощальную реплику, телефония
 # по нему кладёт трубку (иначе на «Спасибо» клиента бот заново спрашивает «что интересует?»).
 END_TAG = "[[END]]"
@@ -141,6 +179,8 @@ def reset(session_id: str) -> None:
     DELIVERY.pop(sid, None)
     LOCKED.pop(sid, None)
     PENDING.pop(sid, None)
+    NAME.pop(sid, None)
+    CALLER.pop(sid, None)
 
 
 def _record_order_item(sid: str, it: dict[str, Any], products: list[dict[str, Any]]) -> None:
@@ -1034,6 +1074,8 @@ async def build_reply(session_id: str, transcript: str) -> str:
     if not HISTORY[sid]:
         nm = _maybe_name(transcript)
         if nm is not None:
+            if nm:
+                NAME[sid] = nm
             greet = f"Очень приятно, {nm}! " if nm else "Очень приятно! "
             # Утверждённое вступление про приём заявки (как в SYSTEM_PROMPT, режим приёма заявок) —
             # говорится ОДИН раз сразу после имени. Раньше быстрый ход отдавал укороченную версию.
