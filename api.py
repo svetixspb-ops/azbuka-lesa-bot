@@ -1,4 +1,4 @@
-"""HTTP-API «мозга» Веры для сценария Voximplant (телефония).
+"""HTTP-API «мозга» Веры для телефонии (Asterisk/AudioSocket, ранее Voximplant).
 
 Тот же мозг, что и в Telegram-боте (brain.py) — расчёт товара/доставки
 детерминированный, LLM = YandexGPT (по .env LLM_PROVIDER).
@@ -14,8 +14,9 @@
   GET  /health                         → состояние + дата каталога
   POST /chat   {session_id, text}      → {reply}                (текст→текст, основной для Voximplant)
   POST /reset  {session_id}            → {ok: true}             (сбросить контекст звонка)
-  POST /voice  (audio/* в теле, ?session_id=, ?tts=1)
-                                        → {transcript, reply, audio_base64:[...]}  (голос→голос, опционально)
+  POST /voice  (audio/* в теле, ?session_id=, ?tts=1, ?fmt=oggopus|lpcm, ?rate=8000)
+                                        → {transcript, reply, end, audio_base64:[...]}  (голос→голос)
+                                        fmt=lpcm&rate=8000 — сырой PCM из SIP-звонка (Asterisk/AudioSocket)
 
 Контракт диалога: на каждую реплику клиента слать /chat с одним и тем же
 session_id (id звонка) — Вера помнит контекст внутри звонка. В начале нового
@@ -157,11 +158,14 @@ async def handle_voice(request: web.Request) -> web.Response:
     if not session_id:
         raise web.HTTPBadRequest(text='{"error":"session_id query param required"}', content_type="application/json")
     want_tts = request.query.get("tts", "1") not in ("0", "false", "no")
+    # fmt=lpcm&rate=8000 — сырой PCM прямо из SIP-звонка (AudioSocket), без перекодирования.
+    fmt = (request.query.get("fmt") or "oggopus").strip()
+    rate = int(request.query.get("rate") or 0) or None
     audio = await request.read()
     if not audio:
         raise web.HTTPBadRequest(text='{"error":"empty audio body"}', content_type="application/json")
     try:
-        transcript = await speechkit.stt(audio)
+        transcript = await speechkit.stt(audio, fmt=fmt, sample_rate=rate)
     except Exception as e:
         log.exception("STT failed: %s", e)
         return web.json_response({"error": "stt_failed", "detail": str(e)}, status=502)
@@ -172,7 +176,9 @@ async def handle_voice(request: web.Request) -> web.Response:
     except Exception as e:
         log.exception("build_reply failed: %s", e)
         return web.json_response({"transcript": transcript, "error": "brain_failed", "detail": str(e)}, status=502)
-    out: dict = {"transcript": transcript, "reply": reply}
+    # Как в /chat: отделяем служебный маркер завершения — телефония по end=true кладёт трубку.
+    reply, end = brain.split_end(reply)
+    out: dict = {"transcript": transcript, "reply": reply, "end": end}
     if want_tts:
         try:
             segments = await speechkit.tts(reply)

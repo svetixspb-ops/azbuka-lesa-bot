@@ -17,14 +17,31 @@ TTS_EMOTION = os.environ.get("YANDEX_TTS_EMOTION", "neutral")  # роль гол
 TTS_SPEED = float(os.environ.get("YANDEX_TTS_SPEED", "1.08"))  # +8% — выбор Sveta/Артёма (вариант 11)
 
 
-async def stt(audio_bytes: bytes, *, lang: str = "ru-RU") -> str:
-    """Распознать голос → текст. audio_bytes — обычно OGG/Opus из Telegram."""
+async def stt(
+    audio_bytes: bytes,
+    *,
+    lang: str = "ru-RU",
+    fmt: str = "oggopus",
+    sample_rate: int | None = None,
+) -> str:
+    """Распознать голос → текст.
+
+    fmt="oggopus"  — голосовые из Telegram (по умолчанию).
+    fmt="lpcm"     — сырой PCM 16-бит LE моно прямо из звонка (SIP/AudioSocket);
+                     тогда обязателен sample_rate (на телефонной линии 8000).
+    Лимит Yandex STT v1 — 1 МБ за запрос (8 кГц LPCM ≈ 65 с).
+    """
     if not (YANDEX_API_KEY and YANDEX_FOLDER_ID):
         raise RuntimeError("YANDEX_API_KEY/YANDEX_FOLDER_ID не заданы")
+    params: dict[str, object] = {"folderId": YANDEX_FOLDER_ID, "lang": lang, "format": fmt}
+    if fmt == "lpcm":
+        if not sample_rate:
+            raise ValueError("для fmt=lpcm нужен sample_rate (8000 на телефонной линии)")
+        params["sampleRateHertz"] = int(sample_rate)
     async with httpx.AsyncClient(timeout=30) as cx:
         r = await cx.post(
             "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize",
-            params={"folderId": YANDEX_FOLDER_ID, "lang": lang, "format": "oggopus"},
+            params=params,
             headers={"Authorization": f"Api-Key {YANDEX_API_KEY}"},
             content=audio_bytes,
         )
