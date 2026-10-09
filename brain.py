@@ -117,6 +117,19 @@ PENDING: dict[str, dict[str, Any]] = {}
 # о чём разговор»). Номер кладёт телефония через GET /callmeta ещё до первого слова.
 NAME: dict[str, str] = {}
 CALLER: dict[str, str] = {}
+# Сессии, где уже прозвучало пояснение про сметный отдел. С 09.10.2026 оно говорится
+# не в приветствии, а в момент ПЕРВОЙ записанной позиции: клиент звонит с готовым
+# запросом, держать его полминуты монологом до того, как он сказал хоть слово, —
+# плохой размен (решение Светы и Артёма).
+INTRO_SAID: set[str] = set()
+
+
+def _intro_once(sid: str) -> str:
+    """Пояснение про приём заявки — ровно один раз за звонок, иначе пустая строка."""
+    if sid in INTRO_SAID:
+        return ""
+    INTRO_SAID.add(sid)
+    return " Сейчас сотрудники не могут ответить, поэтому заявку принимаю я — расчёт подтвердит сметный отдел."
 
 
 def set_caller(session_id: str, number: str) -> None:
@@ -181,6 +194,7 @@ def reset(session_id: str) -> None:
     PENDING.pop(sid, None)
     NAME.pop(sid, None)
     CALLER.pop(sid, None)
+    INTRO_SAID.discard(sid)
 
 
 def _record_order_item(sid: str, it: dict[str, Any], products: list[dict[str, Any]]) -> None:
@@ -429,6 +443,9 @@ _NOT_NAMES = {
     "здравствуйте", "здравствуй", "привет", "приветствую", "добрый", "доброе", "добрая",
     "день", "утро", "вечер", "ночи", "алло", "ало", "да", "слушаю", "говорите", "хорошо",
     "ага", "угу", "нет", "извините", "простите", "девушка",
+    # Имена самой Веры: «Привет, Вера» — это обращение К НЕЙ, а не имя клиента
+    # (то же правило жёстко прописано в prompts.py).
+    "вера", "верочка", "елена",
 }
 
 
@@ -443,6 +460,12 @@ def _maybe_name(text: str) -> str | None:
     low = t.lower()
     if any(s in low for s in _ORDER_SIGNALS) or any(c.isdigit() for c in t):
         return None
+    # Срезаем приветствие ПЕРЕД разбором: «Здравствуйте, меня зовут Сергей» — это имя
+    # Сергей, а не служебное слово. Раньше «здравствуйте» ловилось в _NOT_NAMES, и имя
+    # терялось целиком (найдено на тестовом прогоне нового сценария 09.10.2026).
+    t = re.sub(r"^\s*(здравствуй(те)?|добрый\s+(день|вечер)|доброе\s+утро|приветствую|привет|алло|ало)\b[\s,.!-]*",
+               "", t, flags=re.IGNORECASE).strip()
+    low = t.lower()
     for p in _NAME_LEADINS:
         if low.startswith(p):
             t = t[len(p):].strip()
@@ -901,7 +924,7 @@ def _present(sid: str, it: dict[str, Any], p: dict[str, Any],
         else:
             qty_phrase = _shtuk(tot["n"])
         price_part = f", {_rubles(tot['total'])}" if asked_price else ""
-        return f"Записала: {ref} — {qty_phrase}{price_part}. Что-то ещё?"
+        return f"Записала: {ref} — {qty_phrase}{price_part}.{_intro_once(sid)} Что-то ещё?"
     if short:
         # По умолчанию (наличие не спросили) — не сверяемся с остатком вслух, просто фиксируем.
         return (f"Записала: {ref} — {_shtuk(int(qn))}. Передам заявку менеджеру, он уточнит "
@@ -1079,9 +1102,7 @@ async def build_reply(session_id: str, transcript: str) -> str:
             greet = f"Очень приятно, {nm}! " if nm else "Очень приятно! "
             # Утверждённое вступление про приём заявки (как в SYSTEM_PROMPT, режим приёма заявок) —
             # говорится ОДИН раз сразу после имени. Раньше быстрый ход отдавал укороченную версию.
-            answer = greet + ("Сейчас наши сотрудники не могут ответить, поэтому я приму вашу заявку, "
-                              "сделаю расчёт и передам в сметный отдел на подтверждение заказа. "
-                              "Уверена, у нас есть всё, что вам нужно. Расскажите, какие материалы вам нужны, — я запишу.")
+            answer = greet + "Расскажите, что вам нужно, — подберу и запишу."
             HISTORY[sid].append({"role": "user", "content": transcript})
             HISTORY[sid].append({"role": "assistant", "content": answer})
             _log_turn(sid, "user", transcript)
@@ -1126,14 +1147,33 @@ async def build_reply(session_id: str, transcript: str) -> str:
                                            "на этом все", "ничего больше", "достаточно", "пока всё", "пока все"))
     neg_more = any(w in low for w in ("нет", "не надо", "не нужно", "всё", "все", "закончил", "хватит"))
     done_signal = (no_new_item_glob and bool(ORDER.get(sid)) and len(low) < 40
-                   and stage not in ("await_place", "await_date", "sms_offered")
+                   and stage not in ("await_place", "await_date", "await_name", "sms_offered")
                    and not pickup and not enter_delivery
                    and (explicit_done or (asked_more and neg_more)))
 
+    def _ask_name_or_sms(prefix: str) -> str:
+        """Следующий шаг закрытия: спросить имя, если ещё не знаем, иначе сразу сводку.
+
+        Имя спрашиваем В КОНЦЕ, а не в приветствии (решение Светы и Артёма 09.10.2026):
+        номер звонящего телефония отдаёт сама, а имя в финале не стоит клиенту ожидания.
+        """
+        if NAME.get(sid):
+            DELIVERY[sid]["stage"] = "sms_offered"
+            return prefix + " Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?"
+        DELIVERY[sid]["stage"] = "await_name"
+        return prefix + " И подскажите, как вас записать в заявке?"
+
     if pickup and len(low) < 60 and stage != "await_date":
         DELIVERY[sid] = {"stage": "sms_offered", "mode": "pickup"}
-        direct_reply = ("Самовывоз бесплатный — со склада в Красном Селе, улица Свободы, дом 44 А. "
-                        "Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?")
+        direct_reply = _ask_name_or_sms(
+            "Самовывоз бесплатный — со склада в Красном Селе, улица Свободы, дом 44 А.")
+    elif stage == "await_name":
+        nm = _maybe_name(transcript)
+        if nm:
+            NAME[sid] = nm
+        DELIVERY[sid]["stage"] = "sms_offered"
+        direct_reply = ((f"Записала, {nm}. " if nm else "Поняла. ")
+                        + "Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?")
     elif stage == "sms_offered":
         # Клиент ответил на предложение СМС → детерминированное прощание (звонок завершается).
         DELIVERY[sid]["stage"] = "done"
@@ -1146,7 +1186,7 @@ async def build_reply(session_id: str, transcript: str) -> str:
         summ = _order_summary(sid)
         if summ:
             direct_reply = summ + " Подскажите, нужна доставка или самовывоз со склада в Красном Селе?"
-    elif any(w in low for w in _PAINT_WORDS) and stage not in ("await_place", "await_date", "sms_offered"):
+    elif any(w in low for w in _PAINT_WORDS) and stage not in ("await_place", "await_date", "await_name", "sms_offered"):
         # Покраска — отдельная услуга: без поиска цены/количества, заявка менеджеру (просьба Артёма 2026-06-01).
         direct_reply = ("Покраску материала выполняет менеджер по отдельной заявке — я обязательно её "
                         "зафиксирую и передам, он свяжется с вами и всё рассчитает. Подобрать вам сам материал?")
@@ -1197,7 +1237,7 @@ async def build_reply(session_id: str, transcript: str) -> str:
                                 "На какой день вам нужна доставка?")
     elif stage == "await_date":
         resolved_date = _resolve_relative_date(transcript)
-        dstate.update({"date": transcript.strip(), "date_resolved": resolved_date, "stage": "sms_offered"})
+        dstate.update({"date": transcript.strip(), "date_resolved": resolved_date})
         amt = dstate.get("amount")
         place = dstate.get("place", "")
         # Пункт зачитываем в сводке ТОЛЬКО если он распознан (zone != None). Иначе это мог быть
@@ -1207,9 +1247,11 @@ async def build_reply(session_id: str, transcript: str) -> str:
         cost_part = f", стоимость доставки {_amt(amt)}" if amt else ", стоимость доставки рассчитает менеджер"
         # «послезавтра»/«в пятницу» и т.п. — распознаём в реальную календарную дату (МСК), а не
         # только повторяем слова клиента (иначе заявка в сметный отдел уходит без точной даты).
-        date_part = f"{transcript.strip()} ({resolved_date})" if resolved_date else transcript.strip()
-        direct_reply = (f"Записала: доставка {date_part} {loc}{cost_part}. "
-                        f"Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?")
+        said = transcript.strip()
+        said = said[:1].lower() + said[1:]   # «В пятницу» → «в пятницу»: это середина фразы
+        date_part = f"{said} ({resolved_date})" if resolved_date else said
+        direct_reply = _ask_name_or_sms(
+            f"Записала: доставка {date_part} {loc}{cost_part}.")
     else:
         # Голое подтверждение («да, давайте») к предложенной замене с уже названным количеством →
         # озвучиваем ИТОГ детерминированно (иначе LLM подтвердит без суммы — баг «итог не озвучен»).

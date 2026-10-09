@@ -10,8 +10,9 @@
   суть          — 1-2 предложения от модели по полной расшифровке разговора
 
 Доставка: всегда журнал vera_leads.jsonl, плюс Telegram через @azbukalesa_bot
-(VERA_LEAD_CHAT_IDS → TG_LEAD_CHAT_ID → ADMIN_IDS). Пустые звонки (молчание,
-ошиблись номером) не отправляем — см. _worth_sending.
+(VERA_LEAD_CHAT_IDS → TG_LEAD_CHAT_ID → ADMIN_IDS) и дубль в MAX ботом Буки
+(VERA_MAX_LEAD_USER_IDS). Пустые звонки (молчание, ошиблись номером) не
+отправляем — см. _worth_sending.
 """
 from __future__ import annotations
 
@@ -122,6 +123,36 @@ async def _send_telegram(text: str) -> bool:
     return ok_all
 
 
+async def _send_max(text: str) -> bool:
+    """MAX-дубль заявки. Получатели — VERA_MAX_LEAD_USER_IDS (через запятую).
+
+    Отправляем тем же ботом, что и у Буки (MAX_BOT_TOKEN): магазин один, заводить
+    второго бота ради заявок незачем. Получатель должен хоть раз написать боту —
+    MAX, как и Telegram, не даёт писать первым.
+    """
+    token = (os.environ.get("MAX_BOT_TOKEN") or "").strip()
+    ids = [i.strip() for i in (os.environ.get("VERA_MAX_LEAD_USER_IDS") or "").split(",") if i.strip()]
+    if not (token and ids):
+        return False
+    ok_all = True
+    try:
+        from maxapi import Bot            # импорт здесь — без maxapi остальное живёт
+        bot = Bot(token)
+        for uid in ids:
+            try:
+                await bot.send_message(user_id=int(uid), text=text)
+            except Exception as e:
+                log.error("заявка не ушла в MAX %s: %s", uid, e)
+                ok_all = False
+        sess = getattr(bot, "session", None)
+        if sess and hasattr(sess, "close"):
+            await sess.close()
+    except Exception as e:
+        log.exception("отправка в MAX упала: %s", e)
+        return False
+    return ok_all
+
+
 async def _summarize(dialog: list[tuple[str, str]]) -> str:
     text = "\n".join(f"{'Клиент' if r == 'user' else 'Вера'}: {c}" for r, c in dialog)
     try:
@@ -167,10 +198,12 @@ async def deliver(snap: dict[str, Any] | None) -> dict[str, Any] | None:
             f.write(json.dumps(lead, ensure_ascii=False) + "\n")
     except Exception as e:
         log.error("[%s] журнал заявок недоступен: %s", lead["session_id"], e)
-    lead["sent"] = await _send_telegram(_render(lead))
-    log.info("[%s] заявка: %s / %s / позиций %d / отправлена=%s",
+    text = _render(lead)
+    lead["sent_tg"] = await _send_telegram(text)
+    lead["sent_max"] = await _send_max(text)
+    log.info("[%s] заявка: %s / %s / позиций %d / telegram=%s max=%s",
              lead["session_id"], lead["name"] or "—", lead["phone"] or "—",
-             len(lead["positions"]), lead["sent"])
+             len(lead["positions"]), lead["sent_tg"], lead["sent_max"])
     return lead
 
 
