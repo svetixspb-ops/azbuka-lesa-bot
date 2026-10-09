@@ -111,6 +111,29 @@ def _persist(lead: dict[str, Any]) -> None:
         log.exception("lead persist failed: %s", e)
 
 
+def _cc_user_ids() -> list[str]:
+    """Временные со-получатели заявок в MAX (MAX_LEAD_CC_USER_IDS).
+
+    Включаются только ДО даты MAX_LEAD_CC_UNTIL (YYYY-MM-DD, МСК) и после неё
+    сами отключаются. Так сделано нарочно: Света попросила копию «на несколько
+    дней потестировать» (09.10.2026), а временные настройки, которые надо снять
+    руками, не снимаются — урок 7 плейбука про копилку, та же природа.
+    """
+    ids = [i.strip() for i in (os.environ.get("MAX_LEAD_CC_USER_IDS") or "").split(",") if i.strip()]
+    if not ids:
+        return []
+    until = (os.environ.get("MAX_LEAD_CC_UNTIL") or "").strip()
+    if not until:
+        return []
+    try:
+        if datetime.now(MSK).date() > datetime.strptime(until, "%Y-%m-%d").date():
+            return []
+    except ValueError:
+        log.warning("MAX_LEAD_CC_UNTIL=%r не дата вида ГГГГ-ММ-ДД — копии не шлю", until)
+        return []
+    return ids
+
+
 async def _send_max(text: str) -> bool:
     """MAX-sink. Включается, только если заданы MAX_BOT_TOKEN и получатель.
 
@@ -122,6 +145,7 @@ async def _send_max(text: str) -> bool:
     chat_id = (os.environ.get("MAX_LEAD_CHAT_ID") or "").strip()
     if not (token and (user_id or chat_id)):
         return False
+    ok_all = True
     try:
         from maxapi import Bot  # импорт здесь — чтобы каркас работал и без maxapi
         bot = Bot(token)
@@ -129,10 +153,16 @@ async def _send_max(text: str) -> bool:
             await bot.send_message(user_id=int(user_id), text=text)
         else:
             await bot.send_message(chat_id=int(chat_id), text=text)
+        for uid in _cc_user_ids():
+            try:
+                await bot.send_message(user_id=int(uid), text=text)
+            except Exception as e:
+                log.error("MAX copy to %s failed: %s", uid, e)
+                ok_all = False
         sess = getattr(bot, "session", None)
         if sess and hasattr(sess, "close"):
             await sess.close()
-        return True
+        return ok_all
     except Exception as e:
         log.exception("MAX send failed: %s", e)
         return False
