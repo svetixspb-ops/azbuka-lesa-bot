@@ -82,6 +82,26 @@ def _destem(w: str) -> str:
     return w[:-1] if len(w) > 4 and w and w[-1] in _VOWELS else w
 
 
+def match_place_key(place: str | None) -> str | None:
+    """Канонический ключ пункта из выверенной таблицы ZONE_BY_PLACE (или None)."""
+    p = _norm(place)
+    if not p or p in {"-", "—"}:
+        return None
+    if p in ZONE_BY_PLACE:
+        return p
+    for key in ZONE_BY_PLACE:
+        if key in p:
+            return key
+    # Падежная подстраховка: сравниваем основы (без хвостовой гласной) —
+    # ловит «в Гатчину», «в Красном Селе», «Ропшу» и т.п., если LLM не привёл к им. падежу.
+    pw = [_destem(w) for w in p.split()]
+    for key in ZONE_BY_PLACE:
+        ks = _destem(key.split()[0])
+        if len(ks) >= 4 and any(w.startswith(ks) for w in pw):
+            return key
+    return None
+
+
 def zone_from_place(place: str | None) -> int | str | None:
     p = _norm(place)
     if not p or p in {"-", "—"}:
@@ -89,19 +109,65 @@ def zone_from_place(place: str | None) -> int | str | None:
     for c in _CENTRAL:
         if c in p:
             return "CENTRAL"
-    if p in ZONE_BY_PLACE:
-        return ZONE_BY_PLACE[p]
-    for key, z in ZONE_BY_PLACE.items():
-        if key in p:
-            return z
-    # Падежная подстраховка: сравниваем основы (без хвостовой гласной) —
-    # ловит «в Гатчину», «в Красном Селе», «Ропшу» и т.п., если LLM не привёл к им. падежу.
-    pw = [_destem(w) for w in p.split()]
-    for key, z in ZONE_BY_PLACE.items():
-        ks = _destem(key.split()[0])
-        if len(ks) >= 4 and any(w.startswith(ks) for w in pw):
-            return z
-    return None
+    key = match_place_key(p)
+    return ZONE_BY_PLACE[key] if key else None
+
+
+# ── Пункт в форме «куда» для озвучки ─────────────────────────────────────────
+# «Доставка в Гатчина» звучало в каждом звонке с доставкой (правка 10.10.2026).
+# Для пунктов из таблицы форма задана явно — заодно с правильными заглавными
+# для TTS. Для геокодированных (вне таблицы) применяем правило окончания
+# -а → -у, -я → -ю: для топонимов оно надёжно (Вырица → Вырицу, Луга → Лугу),
+# а Пушкин, Сосново, Тайцы и уже названные в винительном падеже не трогает.
+PLACE_ACCUSATIVE: dict[str, str] = {
+    "красное село": "Красное Село",
+    "дудергоф": "Дудергоф",
+    "можайский": "Можайский",
+    "скачки": "Скачки",
+    "горелово": "Горелово",
+    "новогорелово": "Новогорелово",
+    "виллози": "Виллози",
+    "аннино": "Аннино",
+    "лаголово": "Лаголово",
+    "новоселье": "Новоселье",
+    "русско-высоцкое": "Русско-Высоцкое",
+    "русско высоцкое": "Русско-Высоцкое",
+    "тайцы": "Тайцы",
+    "кипень": "Кипень",
+    "ропша": "Ропшу",
+    "стрельна": "Стрельну",
+    "гатчина": "Гатчину",
+    "пушкин": "Пушкин",
+    "петергоф": "Петергоф",
+    "ломоносов": "Ломоносов",
+    "волосово": "Волосово",
+}
+
+
+def place_spoken(place: str | None) -> str:
+    """Пункт так, как его произносить после «в»: «в Гатчину», «в Красное Село»."""
+    key = match_place_key(place)
+    if key and key in PLACE_ACCUSATIVE:
+        return PLACE_ACCUSATIVE[key]
+    words = (place or "").strip().split()
+    if not words:
+        return ""
+    out = []
+    for w in words:
+        low = w.lower()
+        # Прилагательное в составе названия: «Красная Горка» → «Красную Горку».
+        if low.endswith("ая"):
+            w = w[:-2] + "ую"
+        elif low.endswith("яя"):
+            w = w[:-2] + "юю"
+        out.append(w)
+    last, low = out[-1], out[-1].lower()
+    if len(last) > 2 and not low.endswith(("ую", "юю")):
+        if low.endswith("а"):
+            out[-1] = last[:-1] + "у"
+        elif low.endswith("я"):
+            out[-1] = last[:-1] + "ю"
+    return " ".join(out)
 
 
 def zone_from_km(km: float | None) -> int | None:

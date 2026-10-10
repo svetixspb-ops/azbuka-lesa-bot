@@ -1240,7 +1240,8 @@ async def build_reply(session_id: str, transcript: str) -> str:
             dstate.update({"place": place, "zone": zone, "stage": "await_date"})
             if amount is not None:
                 dstate["amount"] = amount
-                direct_reply = (f"Доставка в {place} — {_amt(amount)}. На какой день вам нужна доставка?")
+                direct_reply = (f"Доставка в {delivery.place_spoken(place)} — {_amt(amount)}. "
+                                f"На какой день вам нужна доставка?")
             else:
                 direct_reply = ("Точную стоимость доставки по этому пункту рассчитает менеджер. "
                                 "На какой день вам нужна доставка?")
@@ -1252,7 +1253,7 @@ async def build_reply(session_id: str, transcript: str) -> str:
         # Пункт зачитываем в сводке ТОЛЬКО если он распознан (zone != None). Иначе это мог быть
         # не расслышанный топоним — не выдаём его за факт.
         place_ok = dstate.get("zone") is not None and place
-        loc = f"в {place}" if place_ok else "по указанному адресу"
+        loc = f"в {delivery.place_spoken(place)}" if place_ok else "по указанному адресу"
         cost_part = f", стоимость доставки {_amt(amt)}" if amt else ", стоимость доставки рассчитает менеджер"
         # «послезавтра»/«в пятницу» и т.п. — распознаём в реальную календарную дату (МСК), а не
         # только повторяем слова клиента (иначе заявка в сметный отдел уходит без точной даты).
