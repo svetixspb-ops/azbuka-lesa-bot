@@ -172,6 +172,11 @@ END_TAG = "[[END]]"
 _FAREWELL = ("хорошего дня", "хорошего вечера", "доброго дня", "доброго вечера",
              "всего доброго", "всего хорошего", "до свидания", "всего наилучшего")
 
+# Штатное закрытие звонка. СМС-сводку убрали 10.10.2026 (решение Светы): шлюз подключит
+# Артём позже, до тех пор звонок заканчивается передачей заявки в сметный отдел.
+CLOSING_LINE = ("Спасибо за обращение! Передаю вашу заявку в сметный отдел, "
+                "менеджер перезвонит и подтвердит заказ. Хорошего дня!")
+
 
 def split_end(text: str) -> tuple[str, bool]:
     """Отделить маркер завершения: вернуть (чистый текст для озвучки, нужно_ли_завершить).
@@ -341,7 +346,7 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
     if not per_item:
         return ("В этой реплике товара нет — это приветствие, уточнение, подтверждение (да/нет/спасибо) "
                 "или завершение разговора. Продолжай по контексту истории диалога: если заказ уже собран "
-                "и клиент подтверждает/завершает — двигайся к закрытию (доставка → СМС-сводка → прощание), "
+                "и клиент подтверждает/завершает — двигайся к закрытию (доставка → имя → прощание), "
                 "НЕ начинай разговор заново и НЕ спрашивай «что вас интересует». Если разговор только начался "
                 "и клиент молчит/поздоровался — мягко уточни, что интересует.")
     blocks = ["Позиции из запроса клиента и найденные по ним товары "
@@ -1147,46 +1152,50 @@ async def build_reply(session_id: str, transcript: str) -> str:
                                            "на этом все", "ничего больше", "достаточно", "пока всё", "пока все"))
     neg_more = any(w in low for w in ("нет", "не надо", "не нужно", "всё", "все", "закончил", "хватит"))
     done_signal = (no_new_item_glob and bool(ORDER.get(sid)) and len(low) < 40
-                   and stage not in ("await_place", "await_date", "await_name", "sms_offered")
+                   and stage not in ("await_place", "await_date", "await_name", "confirm", "done")
                    and not pickup and not enter_delivery
                    and (explicit_done or (asked_more and neg_more)))
 
-    def _ask_name_or_sms(prefix: str) -> str:
-        """Следующий шаг закрытия: спросить имя, если ещё не знаем, иначе сразу сводку.
+    def _ask_name_or_close(prefix: str) -> str:
+        """Следующий шаг закрытия: спросить имя, если ещё не знаем, иначе сразу прощание.
 
         Имя спрашиваем В КОНЦЕ, а не в приветствии (решение Светы и Артёма 09.10.2026):
         номер звонящего телефония отдаёт сама, а имя в финале не стоит клиенту ожидания.
         """
         if NAME.get(sid):
-            DELIVERY[sid]["stage"] = "sms_offered"
-            return prefix + " Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?"
+            # Имя обычно известно из приветствия, поэтому прощание НЕ склеиваем со сводкой:
+            # «хорошего дня» кладёт трубку, а клиент не успел бы поправить дату/адрес.
+            DELIVERY[sid]["stage"] = "confirm"
+            return prefix + " Всё верно?"
         DELIVERY[sid]["stage"] = "await_name"
         return prefix + " И подскажите, как вас записать в заявке?"
 
     if pickup and len(low) < 60 and stage != "await_date":
-        DELIVERY[sid] = {"stage": "sms_offered", "mode": "pickup"}
-        direct_reply = _ask_name_or_sms(
+        DELIVERY[sid] = {"stage": "await_name", "mode": "pickup"}
+        direct_reply = _ask_name_or_close(
             "Самовывоз бесплатный — со склада в Красном Селе, улица Свободы, дом 44 А.")
     elif stage == "await_name":
         nm = _maybe_name(transcript)
         if nm:
             NAME[sid] = nm
-        DELIVERY[sid]["stage"] = "sms_offered"
-        direct_reply = ((f"Записала, {nm}. " if nm else "Поняла. ")
-                        + "Прислать вам СМС со сводкой заказа — позиции, цену и ссылку на сайт?")
-    elif stage == "sms_offered":
-        # Клиент ответил на предложение СМС → детерминированное прощание (звонок завершается).
         DELIVERY[sid]["stage"] = "done"
-        neg = any(w in low for w in ("нет", "не надо", "не нужно", "не присыл"))
-        sms_part = "" if neg else " и пришлю СМС со сводкой заказа"
-        direct_reply = (f"Спасибо за обращение! Передаю вашу заявку в сметный отдел на подтверждение заказа"
-                        f"{sms_part}. Хорошего дня!" + END_TAG)
+        direct_reply = ((f"Записала, {nm}. " if nm else "Поняла. ")
+                        + CLOSING_LINE + END_TAG)
+    elif stage == "confirm":
+        # Клиент ответил на «Всё верно?» → прощание (звонок завершается) либо правка.
+        if any(w in low for w in ("не верно", "неверно", "не так", "не правильно", "неправильно",
+                                  "подожд", "поправ", "измен", "другой", "другую", "лучше")):
+            DELIVERY[sid]["stage"] = None
+            direct_reply = "Поняла, поправим. Подскажите, что изменить?"
+        else:
+            DELIVERY[sid]["stage"] = "done"
+            direct_reply = CLOSING_LINE + END_TAG
     elif done_signal:
         # Повторяем собранный заказ + общая сумма, затем сразу к вопросу доставки.
         summ = _order_summary(sid)
         if summ:
             direct_reply = summ + " Подскажите, нужна доставка или самовывоз со склада в Красном Селе?"
-    elif any(w in low for w in _PAINT_WORDS) and stage not in ("await_place", "await_date", "await_name", "sms_offered"):
+    elif any(w in low for w in _PAINT_WORDS) and stage not in ("await_place", "await_date", "await_name", "confirm", "done"):
         # Покраска — отдельная услуга: без поиска цены/количества, заявка менеджеру (просьба Артёма 2026-06-01).
         direct_reply = ("Покраску материала выполняет менеджер по отдельной заявке — я обязательно её "
                         "зафиксирую и передам, он свяжется с вами и всё рассчитает. Подобрать вам сам материал?")
@@ -1250,7 +1259,7 @@ async def build_reply(session_id: str, transcript: str) -> str:
         said = transcript.strip()
         said = said[:1].lower() + said[1:]   # «В пятницу» → «в пятницу»: это середина фразы
         date_part = f"{said} ({resolved_date})" if resolved_date else said
-        direct_reply = _ask_name_or_sms(
+        direct_reply = _ask_name_or_close(
             f"Записала: доставка {date_part} {loc}{cost_part}.")
     else:
         # Голое подтверждение («да, давайте») к предложенной замене с уже названным количеством →
