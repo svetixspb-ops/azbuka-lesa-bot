@@ -263,7 +263,7 @@ async def main() -> None:
     dialogs_full = render(sessions)
     prompt = DIGEST_PROMPT.format(date=date_label, dialogs=dialogs_full[-20000:])
     body = (await llm.chat([{"role": "user", "content": prompt}],
-                           temperature=0.3, max_tokens=500)).strip()
+                           temperature=0.3, max_tokens=900)).strip()
 
     text = header + stats_block + "\n" + body
     print(text)
