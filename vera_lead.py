@@ -71,8 +71,23 @@ def _worth_sending(sid: str, dialog: list[tuple[str, str]]) -> bool:
     return sum(1 for role, _ in dialog if role == "user") >= 2
 
 
+def _is_test(sid: str) -> bool:
+    """Настоящий звонок — только сессия телефонии (`sip-…`).
+
+    Прогоны из тест-бота (`test-…`) и дымовые проверки (`smoke-…`, `smk-…`) до
+    10.10.2026 уходили менеджеру как живые заявки: Артём получил в MAX «Иван,
+    9 710 ₽» от ночного прогона и искал в этой заявке пропавший номер звонящего
+    (а номера там и не могло быть — Caller ID есть только у звонка). Тестовые
+    заявки остаются у нас: помечаются шапкой и в MAX не дублируются.
+    """
+    return not str(sid).startswith("sip-")
+
+
 def _render(lead: dict[str, Any]) -> str:
-    parts = [f"📞 Заявка со звонка — {lead['ts']}"]
+    parts = []
+    if _is_test(lead["session_id"]):
+        parts.append("🧪 ТЕСТОВЫЙ ПРОГОН, не настоящий звонок — номера звонящего тут нет")
+    parts.append(f"📞 Заявка со звонка — {lead['ts']}")
     parts.append(f"Имя: {lead['name'] or 'не назвал'}")
     parts.append(f"Телефон: {lead['phone'] or 'номер не определился'}")
     if lead["positions"]:
@@ -200,7 +215,8 @@ async def deliver(snap: dict[str, Any] | None) -> dict[str, Any] | None:
         log.error("[%s] журнал заявок недоступен: %s", lead["session_id"], e)
     text = _render(lead)
     lead["sent_tg"] = await _send_telegram(text)
-    lead["sent_max"] = await _send_max(text)
+    # Тестовые прогоны менеджеру в MAX не шлём — см. _is_test.
+    lead["sent_max"] = False if _is_test(lead["session_id"]) else await _send_max(text)
     log.info("[%s] заявка: %s / %s / позиций %d / telegram=%s max=%s",
              lead["session_id"], lead["name"] or "—", lead["phone"] or "—",
              len(lead["positions"]), lead["sent_tg"], lead["sent_max"])
