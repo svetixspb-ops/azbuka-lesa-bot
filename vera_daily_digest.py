@@ -65,8 +65,23 @@ DIGEST_PROMPT = """Ты — аналитик качества голосовог
 """
 
 
+def _is_real_call(sid: str) -> bool:
+    """Настоящий звонок — только сессия телефонии (`sip-…`), как и в vera_lead.py.
+
+    Прогоны тест-бота (`test-…`) и дымовые проверки (`smoke-…`, `smk-…`) 10.10.2026
+    попали в дайджест как живые звонки: в отчёте значилось «Звонков: 7» при двух
+    настоящих, а один из трёх «косяков» разбирал синтетического Ивана из ночного
+    прогона. Разбор мусора стоит дороже, чем его отсутствие: правки уходят в сторону.
+    """
+    return str(sid).startswith("sip-")
+
+
 def read_sessions_for_date(target_date: datetime.date):
-    """Звонки за дату: {session_id: [(role, content, extra), ...]} в порядке появления."""
+    """Сессии за дату: (настоящие звонки, тестовые прогоны).
+
+    В каждом списке — [(session_id, [(role, content, extra), ...]), ...] в порядке появления.
+    Разбираем только настоящие; тестовые нужны лишь для цифры в шапке.
+    """
     sessions: "OrderedDict[str, list]" = OrderedDict()
     try:
         with open(DIALOGS, encoding="utf-8") as f:
@@ -89,8 +104,10 @@ def read_sessions_for_date(target_date: datetime.date):
                     continue
                 sessions.setdefault(sid, []).append((d.get("role"), d.get("content", ""), d))
     except FileNotFoundError:
-        return []
-    return list(sessions.items())
+        return [], []
+    real = [(sid, turns) for sid, turns in sessions.items() if _is_real_call(sid)]
+    tests = [(sid, turns) for sid, turns in sessions.items() if not _is_real_call(sid)]
+    return real, tests
 
 
 def render(sessions) -> str:
@@ -104,6 +121,8 @@ def render(sessions) -> str:
                     line = f"[поиск] «{it.get('запрос')}» → понято {it.get('понято')} → найдено: {found}"
                     if it.get("неточно"):
                         line += f"  (ТОЧНОГО совпадения нет, отброшено: {', '.join(it['неточно'])})"
+                    if it.get("сорт_не_найден"):
+                        line += f"  (СОРТ НЕ СОВПАЛ: {it['сорт_не_найден']})"
                     out.append(line)
                 continue
             who = {"user": "Клиент", "assistant": "Вера", "error": "ОШИБКА"}.get(role, str(role))
@@ -126,6 +145,12 @@ def hard_stats(sessions) -> list[str]:
                     elif it.get("неточно"):
                         misses.append(f"«{it.get('запрос')}» — точного нет, "
                                       f"отброшено: {', '.join(it['неточно'])}")
+                    # Сорт клиента не совпал с каталогом. Раньше такого сигнала не было
+                    # вовсе: 10.10.2026 Вера молча записала сорт ВС вместо просимого БЦ,
+                    # и в детерминированной статистике день выглядел чистым.
+                    if it.get("сорт_не_найден"):
+                        misses.append(f"«{it.get('запрос')}» — сорт не совпал "
+                                      f"({it['сорт_не_найден']})")
             elif role == "user":
                 low = (content or "").lower()
                 if any(m in low for m in _CORRECTION_MARKERS):
@@ -247,12 +272,14 @@ async def main() -> None:
     else:
         target_date = (datetime.datetime.now(MSK) - datetime.timedelta(days=1)).date()
 
-    sessions = read_sessions_for_date(target_date)
+    sessions, tests = read_sessions_for_date(target_date)
     date_label = target_date.strftime("%d.%m.%Y")
     header = f"📞 Дайджест Веры за {date_label}\nЗвонков: {len(sessions)}\n"
+    if tests:
+        header += f"Тестовых прогонов (в разбор не идут): {len(tests)}\n"
 
     if not sessions:
-        text = header + "\nЗа этот день звонков не было."
+        text = header + "\nЗа этот день настоящих звонков не было."
         print(text)
         await send_telegram(text)
         return

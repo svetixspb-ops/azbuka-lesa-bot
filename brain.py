@@ -64,6 +64,9 @@ def _log_found(session_id: str, per_item: list[tuple[dict[str, Any], list[dict[s
                        if it.get(k) is not None},
             "найдено": [p.get("name") for p in products[:5]],
             "неточно": next((p["loose_dropped"] for p in products if p.get("loose_dropped")), None),
+            "сорт_не_найден": (f"просили {it['grade_missing']}, в наличии "
+                               f"{', '.join(it.get('grades_available') or [])}"
+                               if it.get("grade_missing") else None),
         })
     if rows:
         _log_turn(session_id, "search", "", items=rows)
@@ -111,6 +114,10 @@ LOCKED: dict[str, dict[str, Any]] = {}
 # Запрошенное количество/пачки к предложенной замене, ожидающее подтверждения «да».
 # Чтобы на голое «да, давайте» (без повтора числа) озвучить ИТОГ, а не молча уйти к доставке.
 PENDING: dict[str, dict[str, Any]] = {}
+# Сорта, по которым клиенту уже сказали «такого нет, есть вот такой» (ключ — сессия).
+# Спрашивать подтверждение надо ОДИН раз: STT повторяет названный сорт в каждой
+# расшифровке, и без этой памяти Вера зацикливалась бы на одном и том же вопросе.
+GRADE_ASKED: dict[str, set[str]] = defaultdict(set)
 
 # Имя клиента и номер, с которого он звонит — для заявки менеджеру (просьба Артёма
 # 09.10.2026: «должно приходить имя, телефон, с которого человек звонил, и кратко
@@ -197,6 +204,8 @@ def reset(session_id: str) -> None:
     DELIVERY.pop(sid, None)
     LOCKED.pop(sid, None)
     PENDING.pop(sid, None)
+    GRADE_ASKED.pop(sid, None)
+    CALLBACK_ACKED.discard(sid)
     NAME.pop(sid, None)
     CALLER.pop(sid, None)
     INTRO_SAID.discard(sid)
@@ -378,6 +387,17 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
                           f"в заявку как заказанное и НЕ говори «записала». Скажи честно: точно "
                           f"такого в каталоге не вижу, предложи похожее как альтернативу "
                           f"(«есть вот такое — подойдёт?») либо передай позицию в сметный отдел.")
+        # Клиент назвал сорт, которого у найденных позиций нет. Молча подставить ближайший
+        # нельзя: клиент будет уверен, что заказал своё (звонок 10.10.2026 — просил сорт БЦ,
+        # в заявку ушёл ВС). См. _mark_grade_mismatch.
+        if it.get("grade_missing"):
+            have = ", ".join(it.get("grades_available") or [])
+            blocks.append(f"  — ВНИМАНИЕ: клиент назвал сорт {it['grade_missing']}, а в наличии "
+                          f"по этому размеру только сорт {have}. НЕ записывай позицию молча и НЕ "
+                          f"говори «записала»: сначала скажи прямо, что сорта {it['grade_missing']} "
+                          f"по этому размеру нет, назови, какой есть ({have}), и спроси, брать ли "
+                          f"его. Записывай только после ответа клиента. Сорт в названии не "
+                          f"переставляй и свой не придумывай.")
         # Слишком много совпадений И вообще без параметров → НЕ зачитываем список
         # (для голоса длинный перечень = плохо), просим уточнить ОДИН параметр.
         # Если вариантов и так МАЛО (≤3) — уточнять нечего, выбирать не из чего: показываем
@@ -553,6 +573,30 @@ def _asks_price(text: str) -> bool:
     return any(w in t for w in _PRICE_Q_WORDS)
 
 
+# «Пусть мне кто-нибудь перезвонит» / «пусть наберут» / «свяжитесь со мной».
+# Берём только формы с явным адресатом-человеком, чтобы не ловить собственные обороты
+# Веры в расшифровке и вопросы вида «а менеджер перезвонит?» (это вопрос, не просьба).
+_CALLBACK_RE = re.compile(
+    r"(перезвон|перезван|набер[иёеут]|свяж[иет]|связа(?:ть|т)ся|позвон)", re.I)
+_CALLBACK_ASKER_RE = re.compile(r"(пусть|прош|хочу|нужно|надо|можно|мне\b|со мной|мен[яе]\b)", re.I)
+# Текст подтверждения просьбы о звонке. Номер не спрашиваем — он приходит из телефонии.
+_CALLBACK_ACK = "Да, конечно — передам, менеджер вам перезвонит."
+# Сессии, где просьбу о звонке уже подтвердили: повторять в каждой реплике незачем.
+CALLBACK_ACKED: set[str] = set()
+
+
+def _asks_callback(text: str) -> bool:
+    """Клиент просит, чтобы ему перезвонили, — прямая просьба, её надо подтвердить вслух.
+
+    Звонок 10.10.2026, 08:27: клиент дважды сказал «пусть мне перезвонит кто-нибудь» и
+    «пусть мне кто-нибудь наберет». Обе реплики ушли в детерминированный ход (_present),
+    который про просьбу ничего не знает, — Вера молча пошла дальше по сценарию. Правила в
+    промпте тут недостаточно: на этих репликах нейросеть вообще не вызывается.
+    """
+    t = text.lower()
+    return bool(_CALLBACK_RE.search(t) and _CALLBACK_ASKER_RE.search(t))
+
+
 def _len_phrase(length_mm: float | None) -> str:
     if not length_mm:
         return ""
@@ -655,12 +699,42 @@ def _product_grade(p: dict[str, Any]) -> str:
 
 def _grade_filter(it: dict[str, Any], products: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Если клиент назвал сорт — оставляем товары с этим сортом (поле sort ИЛИ вшитый в
-    название). Если таких нет — не блокируем продажу, возвращаем исходный список."""
+    название). Если таких нет — не блокируем продажу, возвращаем исходный список.
+
+    Сам факт несовпадения при этом НЕ теряется: его отмечает _mark_grade_mismatch, и
+    Вера обязана проговорить альтернативу вслух (см. ниже).
+    """
     g = (it.get("grade") or "").strip().upper()
     if not g:
         return products
     matched = [p for p in products if _product_grade(p) == g]
     return matched or products
+
+
+def _mark_grade_mismatch(it: dict[str, Any], products: list[dict[str, Any]]) -> None:
+    """Клиент назвал сорт, которого у найденных позиций нет — пометить это на позиции.
+
+    Звонок 10.10.2026, 08:27: клиент просил «20 на 95 трёхметровая сорт БЦ». Распознано
+    всё верно, включая сорт. Но сорта БЦ в каталоге нет — есть АВ и ВС, и _grade_filter
+    по своему правилу «не блокируем продажу» вернул весь список, а выбор взял первый
+    вариант. В заявку молча ушёл сорт ВС, которого клиент не просил, и наверх не ушло
+    НИКАКОГО сигнала о нестыковке: ни в контекст нейросети, ни в журнал поиска.
+
+    Молчаливая подстановка опаснее отказа: клиент уверен, что заказал БЦ, а приедет ВС.
+    Поэтому метка идёт и в промпт (Вера проговаривает альтернативу и спрашивает
+    подтверждение), и в журнал (дайджест видит это как промах, а не как чистый звонок).
+    """
+    it.pop("grade_missing", None)
+    it.pop("grades_available", None)
+    g = (it.get("grade") or "").strip().upper()
+    if not (g and products):
+        return
+    found = {_product_grade(p) for p in products}
+    found.discard("")
+    if not found or g in found:
+        return
+    it["grade_missing"] = g
+    it["grades_available"] = sorted(found)
 
 
 def _price_phrase(p: dict[str, Any]) -> str:
@@ -963,6 +1037,23 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
         return None  # 0 или мультизаказ → LLM (раздробит по одной, без цен)
     it, products = real[0]
 
+    # Названного сорта по этому размеру нет — спросить ДО записи, а не подставлять молча
+    # (звонок 10.10.2026: просили БЦ, в заявку ушёл ВС — см. _mark_grade_mismatch).
+    # Один раз на сорт: дальше клиент либо согласился, либо назвал другой размер.
+    g_missing = it.get("grade_missing")
+    if g_missing and g_missing not in GRADE_ASKED[sid]:
+        GRADE_ASKED[sid].add(g_missing)
+        have = it.get("grades_available") or []
+        # Один сорт — вопрос «да/нет»; несколько — вопрос «какой», иначе ответ «да» ничего
+        # не выбирает и код опять записал бы первый по остатку, то есть тот же молчаливый
+        # подлог, только с разрешением клиента.
+        if len(have) == 1:
+            return (f"Сорта {g_missing} по этому размеру сейчас нет — есть сорт {have[0]}. "
+                    f"Записать его?")
+        have_s = ", ".join(f"сорт {x}" for x in have)
+        return (f"Сорта {g_missing} по этому размеру сейчас нет — есть {have_s}. "
+                f"Какой записать?")
+
     # Продолжение разговора по уже обсуждаемому товару: клиент назвал количество/подтвердил.
     # Считаем по той же позиции (locked) — цена в итоге совпадёт с озвученной в предложении.
     locked = LOCKED.get(sid)
@@ -1127,6 +1218,8 @@ async def build_reply(session_id: str, transcript: str) -> str:
     log.info("sid=%s items=%s", sid, items)
 
     per_item = [(it, _search_item(it)) for it in items]
+    for it, products in per_item:          # до журнала: несовпадение сорта должно попасть и в него
+        _mark_grade_mismatch(it, products)
     _log_found(sid, per_item)
     low = transcript.lower()
     dstate = DELIVERY[sid]
@@ -1298,6 +1391,15 @@ async def build_reply(session_id: str, transcript: str) -> str:
         msgs.append({"role": "user", "content": transcript + "\n\n" + context_block})
         answer = await llm.chat(msgs, temperature=0.3, max_tokens=110)
         answer = delivery.render_tags(answer)  # на случай, если LLM всё же выставит тег
+
+    # Просьбу «пусть мне перезвонят» подтверждаем ОДИН раз за звонок и ПЕРВОЙ фразой —
+    # иначе она теряется: детерминированные ходы нейросеть не зовут, а в её ответе
+    # подтверждение может не прозвучать (см. _asks_callback). Если Вера уже сказала это
+    # сама, второй раз не дублируем.
+    if _asks_callback(low) and sid not in CALLBACK_ACKED:
+        CALLBACK_ACKED.add(sid)
+        if not _CALLBACK_RE.search(answer):
+            answer = _CALLBACK_ACK + " " + answer
 
     # В историю кладём БЕЗ служебного END_TAG, чтобы модель не копировала его в будущих репликах.
     clean_for_history, _ = split_end(answer)
