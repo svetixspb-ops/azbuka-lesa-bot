@@ -224,6 +224,8 @@ def _record_order_item(sid: str, it: dict[str, Any], products: list[dict[str, An
     if not products:
         return
     p = _pick_product(products, it)   # тот же вариант, что показываем клиенту
+    # Позиция привязалась к товару — черновая строка «со слов клиента» больше не нужна.
+    ORDER[sid].pop(_request_key(it), None)
     # Позиция из прайса без остатка (под заказ): в заявку пишем сам факт запроса, но без
     # цены и объёма — остатка нет, срок и стоимость подтверждает сметный отдел. Иначе
     # нулевой остаток попал бы в «итого по заказу» как обычный товар.
@@ -281,6 +283,50 @@ def _record_order_item(sid: str, it: dict[str, Any], products: list[dict[str, An
     }
 
 
+def _request_ref(it: dict[str, Any]) -> str:
+    """Наименование позиции СО СЛОВ КЛИЕНТА — когда в каталоге такого размера нет и
+    привязать позицию к товару нечем. Собираем из разобранных полей, а не из расшифровки:
+    в расшифровке количество («двести штук») уже есть, и в заявке оно дублировалось бы."""
+    parts = [(it.get("text") or "позиция").strip()]
+    th, w, l, d = it.get("thickness_mm"), it.get("width_mm"), it.get("length_mm"), it.get("diameter_mm")
+    if d:
+        parts.append(f"диаметр {_fmt_dim(d)}")
+    elif th and w:
+        parts.append(f"{_fmt_dim(th)} на {_fmt_dim(w)}")
+    elif th:
+        parts.append(f"толщина {_fmt_dim(th)}")
+    lp = _len_phrase(l)
+    if lp:
+        parts.append(lp)
+    if it.get("grade"):
+        parts.append(f"сорт {it['grade']}")
+    if it.get("target_m3"):
+        parts.append(f"{it['target_m3']} м³")
+    return ", ".join(parts)
+
+
+def _request_key(it: dict[str, Any]) -> str:
+    return "запрос: " + (it.get("text") or it.get("raw") or "позиция").strip().lower()
+
+
+def _record_request_item(sid: str, it: dict[str, Any]) -> None:
+    """Запомнить в заявке то, что клиент попросил, даже если товара под это в каталоге нет.
+
+    Звонок 11.10.2026 (вагонка штиль 14х120, в каталоге 13х126): Вера отвечала «Записала —
+    вагонка штиль сорт АВ, 14 на 120, три метра», а в заявке менеджеру стояло «позиции не
+    записаны» — записывать было нечего, товар каталога к позиции не привязан. Менеджеру
+    важно видеть сам запрос: он подберёт замену сам.
+    """
+    qty = catalog._to_num(it.get("quantity_pieces")) or catalog._to_num(it.get("packs"))
+    prev = ORDER[sid].get(_request_key(it)) or {}
+    ORDER[sid][_request_key(it)] = {
+        "pieces": None, "unit_vol": None, "length_m": None,
+        "total": 0, "how": None, "ref": _request_ref(it),
+        "n": int(qty) if qty else prev.get("n"), "unit": "шт",
+        "estimate": True, "request_only": True,
+    }
+
+
 def _order_summary(sid: str) -> str | None:
     """Сводка всего заказа с ОБЩЕЙ суммой — для повтора перед закрытием (просьба Артёма 2026-06-01)."""
     rows = ORDER.get(sid) or {}
@@ -303,12 +349,15 @@ def _order_summary(sid: str) -> str | None:
         # сводке помечаем словами — иначе клиент решит, что итог посчитан и по ней.
         if r.get("backorder"):
             line += " — под заказ"
+        elif r.get("request_only"):
+            line += " — подберёт менеджер"
         elif r.get("estimate"):
             # Аксессуар без авторасчёта: в «итого» он не вошёл — говорим это вслух, иначе
             # клиент решит, что сумма посчитана и по нему.
             line += " — посчитает менеджер"
         parts.append(line)
     body = "; ".join(parts)
+    body = body[:1].upper() + body[1:]   # сводка идёт новым предложением после «Давайте повторим»
     # Все позиции под заказ — суммы нет, «Итого 0 ₽» говорить нельзя.
     if not grand:
         return (f"Давайте повторим ваш заказ. {body}. Стоимость и срок по этим позициям "
@@ -1109,6 +1158,9 @@ def _present(sid: str, it: dict[str, Any], p: dict[str, Any],
         return f"Записала: {ref} — {qty_phrase}{price_part}.{_intro_once(sid)} Что-то ещё?"
     if short:
         # По умолчанию (наличие не спросили) — не сверяемся с остатком вслух, просто фиксируем.
+        # Записать в заявку обязательно: раньше эта ветка говорила «записала», а позиция в
+        # заказ не попадала, и менеджеру уходило «позиции не записаны» (11.10.2026).
+        _record_order_item(sid, it, [p])
         return (f"Записала: {ref} — {_shtuk(int(qn))}. Передам заявку менеджеру, он уточнит "
                 f"по наличию на сегодня. Что-то ещё?")
     ask = "Сколько упаковок вам нужно?" if p.get("pack_count") else "Сколько вам нужно?"
@@ -1265,6 +1317,10 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
         if not (asked_avail or asked_price):
             # ДЕФОЛТ: наличие не спросили — не сверяемся и не отказываем, просто уточняем
             # недостающее (обычно длину) и фиксируем позицию как есть, дальше решит менеджер.
+            # Товара такого размера в каталоге нет — привязать позицию не к чему, но запрос
+            # клиента в заявке остаться ДОЛЖЕН: раньше Вера говорила «записала», а менеджеру
+            # уходило «позиции не записаны» (звонок 11.10.2026 про вагонку 14х120).
+            _record_request_item(sid, it)
             if not it.get("length_mm"):
                 return ("Поняла, уточните, пожалуйста, длину — запишу заявку, дальше менеджер "
                         "подскажет по наличию.")
@@ -1560,7 +1616,13 @@ async def build_reply(session_id: str, transcript: str) -> str:
             # Мультизаказ / уточнение / разные типы — отвечает LLM (без цифр цен, см. промпт).
             context_block = _build_context_block(per_item, asked_avail=asked_avail, asked_price=asked_price)
             for it, products in per_item:
-                _record_order_item(sid, it, products)
+                if products:
+                    _record_order_item(sid, it, products)
+                elif (it.get("text") or "").strip():
+                    # Товара в каталоге нет совсем, а Вера обещает «передам в сметный отдел» —
+                    # пусть запрос останется в позициях заявки: без этого менеджер видел
+                    # «позиции не записаны» и сам запрос только в тексте разговора.
+                    _record_request_item(sid, it)
 
     if direct_reply is not None:
         # Детерминированный ответ по доставке — нейросеть не вызываем.

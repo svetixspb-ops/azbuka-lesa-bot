@@ -61,6 +61,8 @@ def _positions(sid: str) -> tuple[list[str], int]:
         # менеджеру важно видеть, что товар запрашивали и что он под заказ.
         if r.get("backorder"):
             note = " — ПОД ЗАКАЗ, остатка на складе нет"
+        elif r.get("request_only"):
+            note = " — со слов клиента, в каталоге не нашлось (нужен подбор)"
         elif r.get("estimate"):
             note = " — расчёт за сметным отделом"
         else:
@@ -103,7 +105,13 @@ def _render(lead: dict[str, Any]) -> str:
         parts.append("Что записано:")
         parts += [f"• {p}" for p in lead["positions"]]
         if lead["total"]:
-            parts.append(f"Итого предварительно: {_rubles(lead['total'])}")
+            line = f"Итого предварительно: {_rubles(lead['total'])}"
+            # В сумму входят только посчитанные позиции: если рядом есть «под заказ» или
+            # «со слов клиента», менеджер не должен принять её за итог по всей заявке.
+            if any(" — ПОД ЗАКАЗ" in p or "нужен подбор" in p or "за сметным отделом" in p
+                   for p in lead["positions"]):
+                line += " (только по позициям с ценой)"
+            parts.append(line)
     else:
         parts.append("")
         parts.append("Позиции не записаны — робот до расчёта не дошёл.")
