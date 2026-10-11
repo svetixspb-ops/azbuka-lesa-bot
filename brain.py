@@ -1180,10 +1180,15 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
     # его товара у склада вообще нет, и уходил (звонок 12:54 про мембрану AM-150).
     # Цену и остаток не называем: по нулевому остатку их подтверждает сметный отдел.
     if products and all(p.get("backorder") for p in products):
-        q = _variant_question(sid, it, products)
-        if q:
-            return q
-        p = _pick_product(products, it)
+        # Позицию уже называли и записали — на ответе про количество вариант заново не
+        # переспрашиваем: STT отдаёт «два рулона» без модели, и в выборку опять попадают
+        # и AM 150, и AM 130 (живая проверка 11.10.2026).
+        known = next((x for x in products if x["name"] in ORDER[sid]), None)
+        if known is None:
+            q = _variant_question(sid, it, products)
+            if q:
+                return q
+        p = known or _pick_product(products, it)
         announced = p["name"] in ORDER[sid]   # эту позицию уже называли вслух
         _record_order_item(sid, it, [p])
         qty = (ORDER[sid].get(p["name"]) or {}).get("n")
@@ -1220,10 +1225,12 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
             # Если поиск нашёл эти позиции, только выбросив слово клиента («орех» — такого
             # цвета в наличии нет), детерминированно не отвечаем: пусть ответит LLM, ей в
             # контекст уже положено честное «точного совпадения нет, предложи похожее».
-            q = _variant_question(sid, it, products)
-            if q:
-                return q
-            p = _pick_product(products, it)
+            known = next((x for x in products if x["name"] in ORDER[sid]), None)
+            if known is None:
+                q = _variant_question(sid, it, products)
+                if q:
+                    return q
+            p = known or _pick_product(products, it)
             p["no_price"] = True
             _record_order_item(sid, it, [p])
             return (f"{_accessory_ref(p)} — записала, расчёт сделает сметный отдел и "
