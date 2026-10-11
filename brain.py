@@ -118,6 +118,9 @@ PENDING: dict[str, dict[str, Any]] = {}
 # Спрашивать подтверждение надо ОДИН раз: STT повторяет названный сорт в каждой
 # расшифровке, и без этой памяти Вера зацикливалась бы на одном и том же вопросе.
 GRADE_ASKED: dict[str, set[str]] = defaultdict(set)
+# Аксессуары, по которым уже уточняли вариант (цвет/объём/модель): спрашиваем ОДИН раз,
+# иначе на уточнении клиента можно зациклиться.
+VARIANT_ASKED: dict[str, set[str]] = defaultdict(set)
 
 # Имя клиента и номер, с которого он звонит — для заявки менеджеру (просьба Артёма
 # 09.10.2026: «должно приходить имя, телефон, с которого человек звонил, и кратко
@@ -205,6 +208,7 @@ def reset(session_id: str) -> None:
     LOCKED.pop(sid, None)
     PENDING.pop(sid, None)
     GRADE_ASKED.pop(sid, None)
+    VARIANT_ASKED.pop(sid, None)
     CALLBACK_ACKED.discard(sid)
     NAME.pop(sid, None)
     CALLER.pop(sid, None)
@@ -220,6 +224,23 @@ def _record_order_item(sid: str, it: dict[str, Any], products: list[dict[str, An
     if not products:
         return
     p = _pick_product(products, it)   # тот же вариант, что показываем клиенту
+    # Позиция из прайса без остатка (под заказ): в заявку пишем сам факт запроса, но без
+    # цены и объёма — остатка нет, срок и стоимость подтверждает сметный отдел. Иначе
+    # нулевой остаток попал бы в «итого по заказу» как обычный товар.
+    if p.get("backorder") or p.get("no_price"):
+        # «два рулона» модель отдаёт как packs, «две штуки» — как quantity_pieces: для
+        # позиции без упаковки в каталоге это одно и то же число штук.
+        qty = catalog._to_num(it.get("quantity_pieces")) or catalog._to_num(it.get("packs"))
+        prev = ORDER[sid].get(p["name"]) or {}
+        ORDER[sid][p["name"]] = {
+            "pieces": None, "unit_vol": None, "length_m": None,
+            "total": 0, "how": None, "ref": _accessory_ref(p),
+            # В следующей реплике клиент количество уже не повторяет — записанное не теряем.
+            "n": int(qty) if qty else prev.get("n"), "unit": "шт",
+            "backorder": bool(p.get("backorder")),
+            "estimate": True,   # сумму по этой позиции считает сметный отдел, не мы
+        }
+        return
     tot = catalog.compute_total(p, it)
     if not tot:
         return
@@ -277,8 +298,21 @@ def _order_summary(sid: str) -> str | None:
         else:
             qp = ""
         ref = r.get("ref") or "позиция"
-        parts.append(f"{ref} — {qp}" if qp else ref)
+        line = f"{ref} — {qp}" if qp else ref
+        # Позиция без остатка идёт под заказ: в общую сумму она не входит, поэтому и в
+        # сводке помечаем словами — иначе клиент решит, что итог посчитан и по ней.
+        if r.get("backorder"):
+            line += " — под заказ"
+        elif r.get("estimate"):
+            # Аксессуар без авторасчёта: в «итого» он не вошёл — говорим это вслух, иначе
+            # клиент решит, что сумма посчитана и по нему.
+            line += " — посчитает менеджер"
+        parts.append(line)
     body = "; ".join(parts)
+    # Все позиции под заказ — суммы нет, «Итого 0 ₽» говорить нельзя.
+    if not grand:
+        return (f"Давайте повторим ваш заказ. {body}. Стоимость и срок по этим позициям "
+                f"подтвердит менеджер — передам заявку в сметный отдел.")
     return (f"Давайте повторим ваш заказ. {body}. Итого по заказу {_rubles(grand)} — "
             f"это предварительная стоимость, точную озвучит менеджер.")
 
@@ -342,6 +376,10 @@ def _search_item(it: dict[str, Any]) -> list[dict[str, Any]]:
     )
     if not products and it.get("text"):
         products = catalog.search_loose(it["text"], limit=8)
+    # Ни в наличии, ни среди похожего — ищем по всему прайсу: позиция может быть «под заказ»
+    # (мембраны, плёнки, профили лежат с нулевым остатком, см. catalog.search_backorder).
+    if not products and it.get("text"):
+        products = catalog.search_backorder(it["text"])
     return products
 
 
@@ -411,7 +449,16 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
         # бот считал что сорта нет вообще и не только не спрашивал, а активно игнорировал названный клиентом)
         has_grade = any(_product_grade(p) for p in products) if products else False
         has_qty = any(it.get(k) for k in ("quantity_pieces", "packs", "target_m3"))
-        if products and len(products) > 3 and no_params:
+        # Позиция есть в прайсе, но без остатка (catalog.search_backorder) — проверяем ПЕРВОЙ:
+        # ветки ниже считают цену и остаток, а по нулевому остатку их называть нельзя.
+        if products and all(p.get("backorder") for p in products):
+            names = "; ".join(p["name"] for p in products[:3])
+            blocks.append(f"  — это ЕСТЬ в прайсе склада, но без остатка: позиция ПОД ЗАКАЗ. Найдено: {names}. "
+                          f"Назови позицию клиенту (модель с цифрами — обязательно, AM 150 и AM 130 разные), "
+                          f"скажи, что она идёт под заказ, и запиши в заявку: срок и стоимость подтвердит "
+                          f"сметный отдел. Цену и остаток по ней НЕ называй — остаток нулевой. НЕ говори "
+                          f"«нет в каталоге»/«не продаём». Если количество не названо — спроси его.")
+        elif products and len(products) > 3 and no_params:
             narrow_by = "размер и влажность" if not has_grade else "размер, влажность или сорт"
             blocks.append(f"  — в наличии {len(products)} вариантов. "
                           f"НЕ перечисляй их клиенту списком — задай ОДИН короткий уточняющий вопрос "
@@ -718,6 +765,22 @@ def _full_ref(p: dict[str, Any]) -> str:
         dims.append(lp)
     base = _name_desc(p) or _type_word(p)
     return f"{base}, {', '.join(dims)}" if dims else base
+
+
+_SQM_RE = re.compile(r"(\d+)\s*(?:м2|м²|м\.кв\.?|кв\.?\s*м\.?)", re.IGNORECASE)
+
+
+def _accessory_ref(p: dict[str, Any]) -> str:
+    """Наименование аксессуара (мембрана, плёнка, крепёж) для озвучки.
+
+    _full_ref тут не годится: _name_desc выкидывает ВСЕ токены с цифрами, а у аксессуара
+    цифра — это модель. «Ондутис PRO AM 150» превращалось в «Ондутис PRO AM», хотя AM 150
+    и AM 130 — разные товары с разной ценой, и клиент называет именно модель.
+    Имя берём как есть, чистим только под речь: скобки убираем, «75м2» → «75 квадратных метров».
+    """
+    name = (p.get("name") or "").replace("(", " ").replace(")", " ")
+    name = _SQM_RE.sub(r"\1 квадратных метров", name)
+    return re.sub(r"\s{2,}", " ", name).strip(" .,")
 
 
 _GRADE_TOKENS = {"А", "Б", "АБ", "АВ", "АВС", "В", "ВС", "С", "Б/Ц", "БС", "БСК", "Э"}
@@ -1058,6 +1121,23 @@ _AVAIL_UNKNOWN_PHRASE = ("Я цифровой сотрудник, у меня д
                          "и менеджер свяжется с вами с конкретикой.")
 
 
+def _variant_question(sid: str, it: dict[str, Any], products: list[dict[str, Any]]) -> str | None:
+    """Вариантов аксессуара несколько и различаются они цветом/объёмом/моделью («Масло
+    Неомид 2л Бесцветный / Орех / Тик», «AM 150 / AM 130») — молча взять первый нельзя:
+    ровно так в заявку уходил не тот профиль и не тот сорт (звонки 09.10 и 10.10.2026).
+    Спрашиваем один раз на НАБОР вариантов, дальше называем первый вслух и записываем —
+    иначе вопрос повторяется слово в слово: формулировка запроса от реплики к реплике
+    меняется («масло для террас неомид» → «масло неомид орех»), а набор остаётся тот же."""
+    if len(products) < 2:
+        return None
+    key = ",".join(sorted(str(x.get("id")) for x in products))
+    if key in VARIANT_ASKED[sid]:
+        return None
+    VARIANT_ASKED[sid].add(key)
+    names = ", ".join(_accessory_ref(x) for x in products[:3])
+    return f"Есть несколько вариантов: {names}. Какой записать?"
+
+
 def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str, Any]]]],
                     asked_avail: bool = False, asked_price: bool = False) -> str | None:
     """Детерминированная реплика для ОДИНОЧНОЙ определённой позиции.
@@ -1094,6 +1174,30 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
         return (f"Сорта {g_missing} по этому размеру сейчас нет — есть {have_s}. "
                 f"Какой записать?")
 
+    # Позиция нашлась только в прайсе, остатка на складе нет (catalog.search_backorder).
+    # Называем найденное вслух и фиксируем в заявке: до 11.10.2026 Вера на такой товар
+    # отвечала «этого нет в каталоге, передам в сметный отдел» — человек слышал, что
+    # его товара у склада вообще нет, и уходил (звонок 12:54 про мембрану AM-150).
+    # Цену и остаток не называем: по нулевому остатку их подтверждает сметный отдел.
+    if products and all(p.get("backorder") for p in products):
+        q = _variant_question(sid, it, products)
+        if q:
+            return q
+        p = _pick_product(products, it)
+        announced = p["name"] in ORDER[sid]   # эту позицию уже называли вслух
+        _record_order_item(sid, it, [p])
+        qty = (ORDER[sid].get(p["name"]) or {}).get("n")
+        # Клиент отвечает на «сколько нужно?» — повторять длинное наименование второй раз
+        # незачем, по телефону это звучит как заевшая пластинка.
+        if announced:
+            qty_part = f": {_shtuk(int(qty))}" if qty else ""
+            return (f"Записала{qty_part}. Передам в сметный отдел — подтвердят срок "
+                    f"и стоимость и перезвонят. Что-то ещё?")
+        tail = "Что-то ещё?" if qty else "Сколько нужно?"
+        return (f"{_accessory_ref(p)} — такая позиция у нас есть, но не на складе: "
+                f"пойдёт под заказ. Записала в заявку, сметный отдел подтвердит срок "
+                f"и стоимость и перезвонит. {tail}")
+
     # Продолжение разговора по уже обсуждаемому товару: клиент назвал количество/подтвердил.
     # Считаем по той же позиции (locked) — цена в итоге совпадёт с озвученной в предложении.
     locked = LOCKED.get(sid)
@@ -1109,10 +1213,21 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
         accessory = products and all(
             not (p.get("thickness_mm") or p.get("width_mm") or p.get("length_mm") or p.get("diameter_mm"))
             for p in products)
-        if accessory:
-            name = _type_word(products[0]).capitalize()
-            return (f"{name} — это передам в сметный отдел, коллеги посчитают и перезвонят. "
-                    f"Что-то ещё подобрать?")
+        if accessory and not any(x.get("loose_dropped") for x in products):
+            # Расчёта по аксессуарам у нас нет (решение Sveta), но позиция всё равно должна
+            # попасть в заявку менеджеру: раньше она оставалась только в тексте «о чём
+            # говорили», а в списке позиций стояло «не записаны» (звонок 11.10.2026).
+            # Если поиск нашёл эти позиции, только выбросив слово клиента («орех» — такого
+            # цвета в наличии нет), детерминированно не отвечаем: пусть ответит LLM, ей в
+            # контекст уже положено честное «точного совпадения нет, предложи похожее».
+            q = _variant_question(sid, it, products)
+            if q:
+                return q
+            p = _pick_product(products, it)
+            p["no_price"] = True
+            _record_order_item(sid, it, [p])
+            return (f"{_accessory_ref(p)} — записала, расчёт сделает сметный отдел и "
+                    f"менеджер перезвонит. Что-то ещё подобрать?")
         return None  # «нужна рейка» без размеров → LLM уточнит параметры
 
     # Только товары, ТОЧНО совпавшие по названным размерам (без «съезда» поиска).

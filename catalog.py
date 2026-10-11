@@ -235,7 +235,7 @@ def search(
     return []
 
 
-def search_loose(text: str, limit: int = 8) -> list[dict[str, Any]]:
+def search_loose(text: str, limit: int = 8, available_only: bool = True) -> list[dict[str, Any]]:
     """Свободный поиск без размеров: токены из запроса через LIKE.
 
     Если по ВСЕМ токенам сразу ничего не нашлось (незнакомое/редкое слово исполнения,
@@ -247,7 +247,7 @@ def search_loose(text: str, limit: int = 8) -> list[dict[str, Any]]:
         return []
     for n in range(len(tokens), 0, -1):
         subset = tokens[:n]
-        sql_parts = ["available=1 AND count > 0"]
+        sql_parts = ["available=1 AND count > 0"] if available_only else ["1=1"]
         params: list[Any] = []
         for t in subset:
             sql_parts.append("name_lower LIKE ?")
@@ -264,6 +264,41 @@ def search_loose(text: str, limit: int = 8) -> list[dict[str, Any]]:
                     r["loose_dropped"] = dropped
             return rows
     return []
+
+
+# Модель товара пишут и через дефис, и через пробел: клиент говорит «AM-150», в фиде
+# «AM 150». Токен «am-150» не матчил ни одно название — поэтому перед поиском по прайсу
+# дефис между буквами и цифрами разжимаем в пробел.
+_MODEL_DASH_RE = re.compile(r"(?<=[A-Za-zА-Яа-я])-(?=\d)")
+
+
+def search_backorder(text: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Поиск по ВСЕМУ прайсу, включая позиции с нулевым остатком — «под заказ».
+
+    Зачем: в фиде 1548 позиций, остаток есть у 601. Вся неосновная линейка (мембраны,
+    плёнки, профили) лежит с count=0, и поиск по наличию её не видел — на товар ИЗ
+    ПРАЙСА Азбуки Вера отвечала «этого нет, передам в сметный отдел» (звонок 11.10.2026
+    12:54: просили «диффузионную мембрану AM-150», в прайсе есть «Ондутис PRO AM 150»
+    за 9 743 ₽ с остатком 0; клиент бросил трубку).
+
+    Берём только позиции, совпавшие по ВСЕМ словам запроса (loose_dropped пуст): «похожее»
+    вместо запрошенного тут не нужно — для этого есть обычный search_loose по наличию.
+    И только БЕЗ размеров, то есть аксессуары (мембраны, плёнки, Ондулин, масла, крепёж —
+    335 позиций с нулевым остатком): по пиломатериалу поведение остаётся прежним, его
+    сценарий Артём отлаживал отдельно, и «нет на складе» про доску Вера не говорит.
+    Найденное помечаем backorder=True: цену такой позиции вслух НЕ называем (остаток
+    нулевой, срок и цену подтверждает сметный отдел) и в сумму заказа не кладём.
+    """
+    rows = search_loose(_MODEL_DASH_RE.sub(" ", text), limit=limit * 5, available_only=False)
+    out = []
+    for r in rows:
+        if r.get("loose_dropped") or (r.get("count") or 0) > 0:
+            continue
+        if any(r.get(k) for k in ("thickness_mm", "width_mm", "length_mm", "diameter_mm")):
+            continue   # пиломатериал — не наша ветка
+        r["backorder"] = True
+        out.append(r)
+    return out[:limit]
 
 
 def piece_volume_m3(thickness_mm: float | None, width_mm: float | None, length_mm: float | None,

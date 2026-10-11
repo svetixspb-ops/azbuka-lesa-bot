@@ -57,7 +57,15 @@ def _positions(sid: str) -> tuple[list[str], int]:
         n, unit = r.get("n"), r.get("unit") or "шт"
         qty = f" — {int(n)} {unit}" if n else ""
         total = f", {_rubles(r['total'])}" if r.get("total") else ""
-        lines.append(f"{r.get('ref') or 'позиция'}{qty}{total}")
+        # Позиция из прайса без остатка: цены в заявке нет и в итог она не входит —
+        # менеджеру важно видеть, что товар запрашивали и что он под заказ.
+        if r.get("backorder"):
+            note = " — ПОД ЗАКАЗ, остатка на складе нет"
+        elif r.get("estimate"):
+            note = " — расчёт за сметным отделом"
+        else:
+            note = ""
+        lines.append(f"{r.get('ref') or 'позиция'}{qty}{total}{note}")
     return lines, grand
 
 
