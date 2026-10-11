@@ -1233,6 +1233,13 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
             p = known or _pick_product(products, it)
             p["no_price"] = True
             _record_order_item(sid, it, [p])
+            # Второй ход по той же позиции (клиент назвал количество) — короткое
+            # подтверждение: полное наименование второй раз звучит как заевшая пластинка.
+            if known is not None:
+                qty = (ORDER[sid].get(p["name"]) or {}).get("n")
+                qty_part = f": {_shtuk(int(qty))}" if qty else ""
+                return (f"Записала{qty_part}. Расчёт сделает сметный отдел и менеджер "
+                        f"перезвонит. Что-то ещё подобрать?")
             return (f"{_accessory_ref(p)} — записала, расчёт сделает сметный отдел и "
                     f"менеджер перезвонит. Что-то ещё подобрать?")
         return None  # «нужна рейка» без размеров → LLM уточнит параметры
