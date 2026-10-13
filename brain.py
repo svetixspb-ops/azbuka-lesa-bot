@@ -1168,6 +1168,27 @@ def _present(sid: str, it: dict[str, Any], p: dict[str, Any],
     return f"Есть {ref}{price_part}. {ask}"
 
 
+def _recorded_price_reply(sid: str) -> str | None:
+    """Прямой вопрос о цене по позиции, которая УЖЕ записана в заявку, — отвечаем КОДОМ.
+
+    Звонок 13.10.2026: на «Да, а сколько это будет стоить?» ход ушёл в нейросеть (позиция
+    записана, ожидание количества уже снято) — та назвала 17 500 ₽ за куб и итог 26 775 ₽,
+    которых в каталоге нет, а менеджеру в заявку ушли верные 32 963 ₽. Цифра, которую слышит
+    клиент, и цифра в заявке расходиться не должны: берём сумму из той же записи заказа.
+    """
+    p = LOCKED.get(sid)
+    if not p:
+        return None
+    rec = ORDER[sid].get(p.get("name") or "")
+    if not rec or not rec.get("total") or rec.get("estimate") or rec.get("backorder"):
+        return None
+    if rec.get("unit") == "уп":
+        qty_phrase = f"{rec['n']} {_plural(rec['n'], 'упаковка', 'упаковки', 'упаковок')}"
+    else:
+        qty_phrase = _shtuk(rec["n"])
+    return f"{rec['ref']} — {qty_phrase}, {_rubles(rec['total'])}. Что-то ещё?"
+
+
 _AVAIL_UNKNOWN_PHRASE = ("Я цифровой сотрудник, у меня данные на утро — возможно, за сегодня что-то "
                          "уже произвели или привезли, но я этого не знаю. Давайте запишу ваши пожелания, "
                          "и менеджер свяжется с вами с конкретикой.")
@@ -1600,7 +1621,12 @@ async def build_reply(session_id: str, transcript: str) -> str:
         asked_avail = _asks_availability(low)
         asked_price = _asks_price(low)
         det = None
-        if affirm and no_new_item and LOCKED.get(sid) and PENDING.get(sid):
+        # Прямой вопрос о цене по уже зафиксированной позиции тоже считаем КОДОМ, а не нейросетью:
+        # «affirm» ограничен длиной реплики (<30 символов), и звонок 13.10.2026 в него не попал —
+        # «Да, а сколько это будет стоить?» (31 символ) ушёл в LLM, та выдумала 17 500 ₽ за куб и
+        # итог 26 775 ₽, а менеджеру в заявку ушли верные 32 963 ₽. Цифры клиенту и в заявке
+        # разъезжаться не должны.
+        if (affirm or asked_price) and no_new_item and LOCKED.get(sid) and PENDING.get(sid):
             p = LOCKED[sid]
             synth = {"text": _type_word(p), "raw": "",
                      "quantity_pieces": PENDING[sid].get("quantity_pieces"),
@@ -1610,6 +1636,10 @@ async def build_reply(session_id: str, transcript: str) -> str:
         # Иначе — обычный детерминированный ход: одиночная определённая позиция считается кодом.
         if det is None:
             det = _product_reply(sid, per_item, asked_avail=asked_avail, asked_price=asked_price)
+        # Цену по уже записанной позиции называем из заявки, а не отдаём нейросети — см.
+        # _recorded_price_reply (звонок 13.10.2026: выдуманные 17 500 ₽ за куб).
+        if det is None and asked_price and no_new_item:
+            det = _recorded_price_reply(sid)
         if det is not None:
             direct_reply = det
         else:
