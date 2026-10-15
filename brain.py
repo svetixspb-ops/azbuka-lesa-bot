@@ -67,6 +67,9 @@ def _log_found(session_id: str, per_item: list[tuple[dict[str, Any], list[dict[s
             "сорт_не_найден": (f"просили {it['grade_missing']}, в наличии "
                                f"{', '.join(it.get('grades_available') or [])}"
                                if it.get("grade_missing") else None),
+            "длина_не_найдена": (f"просили {it['length_missing']:g} мм, в наличии "
+                                 f"{', '.join(f'{x:g}' for x in it.get('lengths_available') or [])}"
+                                 if it.get("length_missing") else None),
         })
     if rows:
         _log_turn(session_id, "search", "", items=rows)
@@ -118,6 +121,11 @@ PENDING: dict[str, dict[str, Any]] = {}
 # Спрашивать подтверждение надо ОДИН раз: STT повторяет названный сорт в каждой
 # расшифровке, и без этой памяти Вера зацикливалась бы на одном и том же вопросе.
 GRADE_ASKED: dict[str, set[str]] = defaultdict(set)
+# Длины, по которым уже сказали «такой нет» — чтобы не переспрашивать на каждой реплике.
+LENGTH_ASKED: dict[str, set[float]] = defaultdict(set)
+# Висящий вопрос «какую длину записать»: ответ клиента надо вернуть в позицию, иначе
+# extract_query склеит его с прежней длиной («наличник на 2,70, давайте 2,20»).
+LENGTH_PENDING: dict[str, dict[str, Any]] = {}
 # Аксессуары, по которым уже уточняли вариант (цвет/объём/модель): спрашиваем ОДИН раз,
 # иначе на уточнении клиента можно зациклиться.
 VARIANT_ASKED: dict[str, set[str]] = defaultdict(set)
@@ -208,6 +216,8 @@ def reset(session_id: str) -> None:
     LOCKED.pop(sid, None)
     PENDING.pop(sid, None)
     GRADE_ASKED.pop(sid, None)
+    LENGTH_ASKED.pop(sid, None)
+    LENGTH_PENDING.pop(sid, None)
     VARIANT_ASKED.pop(sid, None)
     CALLBACK_ACKED.discard(sid)
     NAME.pop(sid, None)
@@ -485,6 +495,17 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
                           f"по этому размеру нет, назови, какой есть ({have}), и спроси, брать ли "
                           f"его. Записывай только после ответа клиента. Сорт в названии не "
                           f"переставляй и свой не придумывай.")
+        # Длины, которую назвал клиент, нет ни у одной найденной позиции. Записать её
+        # молча — значит отпустить человека с уверенностью, что товар такой длины есть
+        # (звонок 14.10.2026 про наличник 2,70). См. _mark_length_mismatch.
+        if it.get("length_missing"):
+            want = _len_phrase(it["length_missing"])
+            have = ", ".join(_len_phrase(x) for x in it.get("lengths_available") or [])
+            blocks.append(f"  — ВНИМАНИЕ: клиент назвал длину {want}, а по этому товару "
+                          f"в наличии только {have}. НЕ записывай {want} молча и НЕ говори "
+                          f"«записала»: сначала скажи прямо, что такой длины нет, назови, "
+                          f"какая есть ({have}), и спроси — записать её или оставить {want} "
+                          f"на подбор менеджеру. Записывай только после ответа клиента.")
         # Слишком много совпадений И вообще без параметров → НЕ зачитываем список
         # (для голоса длинный перечень = плохо), просим уточнить ОДИН параметр.
         # Если вариантов и так МАЛО (≤3) — уточнять нечего, выбирать не из чего: показываем
@@ -898,6 +919,92 @@ def _mark_grade_mismatch(it: dict[str, Any], products: list[dict[str, Any]]) -> 
     it["grades_available"] = sorted(found)
 
 
+# Длина товара лежит в разных колонках: «Уголок деревянный 60х60х3000 мм» разбирается
+# как толщина/ширина/длина, а «Наличник 120х2200» — это два числа, и 2200 импорт кладёт
+# в width_mm (Ш×В на слух, см. комментарий в catalog.search). Поэтому длину ищем в обеих.
+_MAX_LEN_MM = 12000   # длиннее пиломатериала у склада не бывает; выше — мусор импорта
+
+
+def _product_length_mm(p: dict[str, Any]) -> float | None:
+    """Длина позиции в мм, с какой бы колонки она ни пришла. None — длины у товара нет."""
+    for key in ("length_mm", "width_mm"):
+        v = p.get(key)
+        if v and 1000 <= float(v) <= _MAX_LEN_MM:
+            return float(v)
+    return None
+
+
+_LEN_NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_LEN_AGREE_RE = re.compile(r"(да|давай|ладно|хорошо|согласен|согласна|пойдёт|подойдёт|годится|беру)",
+                           re.IGNORECASE)
+
+
+def _strip_length(text: str, length_mm: float) -> str:
+    """Убрать из строки упоминание конкретной длины — и в метрах, и в миллиметрах."""
+    m = length_mm / 1000
+    forms = {f"{m:g}", f"{m:g}".replace(".", ","), f"{length_mm:g}"}
+    if m == int(m):
+        forms |= {f"{int(m)},0", f"{int(m)}.0"}
+    else:  # «2,7» в речи звучит и как «2,70»
+        forms |= {f"{m:.2f}", f"{m:.2f}".replace(".", ",")}
+    out = text
+    for f in sorted(forms, key=len, reverse=True):
+        out = re.sub(rf"(?<!\d){re.escape(f)}(?!\d)\s*(мм|м(?:етр\w*)?)?", " ", out)
+    out = re.sub(r"\s*(на|по)\s*(?=[,.]|$)", " ", out)
+    out = re.sub(r"\s+([,.;])", r"\1", out)          # «наличник , давайте» → «наличник, давайте»
+    out = re.sub(r"([,;])\s*(?=[,;])", "", out)
+    return re.sub(r"\s{2,}", " ", out).strip(" ,.;-") or text
+
+
+def _chosen_length(transcript: str, have: list[float]) -> float | None:
+    """Клиент ответил на наш вопрос «какую длину записать» — какую именно он выбрал.
+
+    Нужна, потому что ответ приходит отдельной короткой репликой («давайте 2,20»), а
+    extract_query разбирает её вместе с историей и склеивает обе длины в одну строку —
+    Вера проговаривала «записала наличник на 2,70, давайте 2,20». None — выбора не видно
+    (клиент оставил свою длину, переспросил или заговорил о другом).
+    """
+    for raw in _LEN_NUM_RE.findall(transcript):
+        v = float(raw.replace(",", "."))
+        mm = v * 1000 if v < 20 else v        # «2,2» — метры, «2200» — миллиметры
+        for h in have:
+            if abs(h - mm) <= max(10.0, h * 0.01):
+                return h
+    # Вариант один и клиент просто согласился — выбирать не из чего.
+    if len(have) == 1 and _LEN_AGREE_RE.search(transcript):
+        return have[0]
+    return None
+
+
+def _mark_length_mismatch(it: dict[str, Any], products: list[dict[str, Any]]) -> None:
+    """Клиент назвал длину, которой нет ни у одной найденной позиции — пометить это.
+
+    Звонок 14.10.2026, 14:41: просили «наличник на 2,70». Наличники у склада только
+    2200 мм, и поиск честно вернул их (длину он ослабляет сам, когда точной нет). Но
+    наверх не ушло никакого сигнала, что длина другая, — Вера сказала «записала, наличник
+    на 2,70» и передала заявку менеджеру. Клиентка положила трубку в уверенности, что
+    товар такой длины есть.
+
+    Это та же молчаливая подстановка, что и с сортом (_mark_grade_mismatch), только по
+    длине: отказ честнее, чем согласие с несуществующим размером. Метка идёт в промпт,
+    в детерминированную реплику и в журнал — чтобы дайджест видел это как промах.
+    """
+    it.pop("length_missing", None)
+    it.pop("lengths_available", None)
+    want = catalog._to_num(it.get("length_mm"))
+    if not (want and products):
+        return
+    found = {_product_length_mm(p) for p in products}
+    found.discard(None)
+    if not found:
+        return  # длины у этих товаров вообще нет — сравнивать не с чем
+    # Допуск 1%: 2.5 м и 2500 мм должны совпасть несмотря на округления разбора.
+    if any(abs(f - want) <= max(10.0, want * 0.01) for f in found):
+        return
+    it["length_missing"] = want
+    it["lengths_available"] = sorted(found)
+
+
 def _price_phrase(p: dict[str, Any]) -> str:
     """«… за упаковку» для пакованных товаров (евровагонка ×10), иначе «… за штуку»."""
     unit = "упаковку" if p.get("pack_count") else "штуку"
@@ -1256,6 +1363,23 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
         return (f"Сорта {g_missing} по этому размеру сейчас нет — есть {have_s}. "
                 f"Какой записать?")
 
+    # Названной длины нет ни у одной найденной позиции — сказать вслух и дать выбор,
+    # а не записывать несуществующий размер (звонок 14.10.2026 14:41 про наличник 2,70).
+    # Отказом это не становится: вторая половина вопроса всегда оставляет заявку живой.
+    # Один раз на длину — дальше клиент либо выбрал, либо назвал другой размер.
+    l_missing = it.get("length_missing")
+    if l_missing and l_missing not in LENGTH_ASKED[sid]:
+        LENGTH_ASKED[sid].add(l_missing)
+        want = _len_phrase(l_missing)
+        have = it.get("lengths_available") or []
+        LENGTH_PENDING[sid] = {"want": l_missing, "have": list(have)}
+        if len(have) == 1:
+            return (f"Длины {want} по этому товару сейчас нет — есть {_len_phrase(have[0])}. "
+                    f"Записать её или оставить {want}, менеджер поищет?")
+        have_s = ", ".join(_len_phrase(x) for x in have)
+        return (f"Длины {want} по этому товару сейчас нет — есть {have_s}. "
+                f"Какую записать? Или оставить {want}, менеджер поищет.")
+
     # Позиция нашлась только в прайсе, остатка на складе нет (catalog.search_backorder).
     # Называем найденное вслух и фиксируем в заявке: до 11.10.2026 Вера на такой товар
     # отвечала «этого нет в каталоге, передам в сметный отдел» — человек слышал, что
@@ -1481,11 +1605,30 @@ async def build_reply(session_id: str, transcript: str) -> str:
         log.exception("extract_query failed: %s", e)
         q = {"items": []}
     items = q.get("items") or []
+    # Ответ на наш же вопрос «какую длину записать»: подменяем длину в позиции до поиска,
+    # иначе ниже по стеку останется длина, которой нет, и Вера проговорит обе.
+    if LENGTH_PENDING.get(sid):
+        pend = LENGTH_PENDING[sid]
+        chosen = _chosen_length(transcript, pend["have"])
+        if chosen is not None:
+            for it in items:
+                it["length_mm"] = chosen
+                it.pop("length_missing", None)
+                # Отвергнутую длину вычищаем из текста запроса: extract_query склеивает
+                # ответ с историей («наличник на 2,70, давайте 2,20»), и нейросеть потом
+                # зачитывает клиенту обе — ту, которой нет, первой.
+                for key in ("raw", "text"):
+                    if it.get(key):
+                        it[key] = _strip_length(it[key], pend["want"])
+            LENGTH_PENDING.pop(sid, None)
+        elif items:
+            LENGTH_PENDING.pop(sid, None)   # заговорил о другом — вопрос снят
     log.info("sid=%s items=%s", sid, items)
 
     per_item = [(it, _search_item(it)) for it in items]
-    for it, products in per_item:          # до журнала: несовпадение сорта должно попасть и в него
+    for it, products in per_item:          # до журнала: несовпадение сорта и длины должно попасть и в него
         _mark_grade_mismatch(it, products)
+        _mark_length_mismatch(it, products)
     _log_found(sid, per_item)
     low = transcript.lower()
     dstate = DELIVERY[sid]
