@@ -75,7 +75,7 @@ def read_sessions_for_date(target_date: datetime.date):
                 sid = str(d.get("session_id", "?"))
                 if not sid.startswith(("web-", "max-", "vk-")):  # только реальные клиентские каналы, не техпинги/тесты Нави
                     continue
-                sessions.setdefault(sid, []).append((d.get("role"), d.get("content", "")))
+                sessions.setdefault(sid, []).append((dt, d.get("role"), d.get("content", "")))
     except FileNotFoundError:
         return []
     return list(sessions.items())
@@ -107,11 +107,24 @@ def count_stt_for_date(target_date: datetime.date) -> int:
 def render(sessions) -> str:
     out = []
     for sid, turns in sessions:
-        out.append(f"--- Диалог {sid} ---")
-        for role, content in turns:
+        start = turns[0][0].strftime("%d.%m.%Y %H:%M")
+        out.append(f"--- Диалог {sid} (начало {start} МСК) ---")
+        for dt, role, content in turns:
             who = "Клиент" if role == "user" else ("Бука" if role == "assistant" else str(role))
-            out.append(f"{who}: {content}")
+            out.append(f"[{dt.strftime('%H:%M')}] {who}: {content}")
     return "\n".join(out)
+
+
+def hours_line(sessions) -> str:
+    """Распределение диалогов по часам (МСК) — по времени первого сообщения."""
+    if not sessions:
+        return ""
+    by_hour: dict[int, int] = {}
+    for _sid, turns in sessions:
+        h = turns[0][0].hour
+        by_hour[h] = by_hour.get(h, 0) + 1
+    parts = [f"{h:02d}:00–{(h + 1) % 24:02d}:00 — {n}" for h, n in sorted(by_hour.items())]
+    return "Когда писали (МСК): " + ", ".join(parts)
 
 
 async def send_telegram(text: str) -> bool:
@@ -191,7 +204,9 @@ async def main() -> None:
     channel_line = ", ".join(f"{k}: {v}" for k, v in by_channel.items() if v)
     stt_count = count_stt_for_date(target_date)
     voice_line = f"\nГолосовых сообщений: {stt_count}" if stt_count else ""
-    header = f"📊 Дайджест Буки за {date_label}\nДиалогов: {len(sessions)} ({channel_line}){voice_line}\n"
+    hours = hours_line(sessions)
+    hours_block = f"\n{hours}" if hours else ""
+    header = f"📊 Дайджест Буки за {date_label}\nДиалогов: {len(sessions)} ({channel_line}){voice_line}{hours_block}\n"
 
     if not sessions:
         text = header + "\nЗа этот день диалогов не было."
