@@ -219,6 +219,7 @@ def reset(session_id: str) -> None:
     LENGTH_ASKED.pop(sid, None)
     LENGTH_PENDING.pop(sid, None)
     VARIANT_ASKED.pop(sid, None)
+    OPERATOR_ASKED.pop(sid, None)
     CALLBACK_ACKED.discard(sid)
     NAME.pop(sid, None)
     CALLER.pop(sid, None)
@@ -317,6 +318,16 @@ def _request_ref(it: dict[str, Any]) -> str:
 
 def _request_key(it: dict[str, Any]) -> str:
     return "запрос: " + (it.get("text") or it.get("raw") or "позиция").strip().lower()
+
+
+def _said_label(it: dict) -> str:
+    """Короткий повтор того, что клиент уже назвал, — чтобы уточняющий вопрос не звучал
+    так, будто предыдущую реплику не услышали (звонок 18.10.2026 16:14)."""
+    label = (it.get("raw") or it.get("text") or "").strip()
+    label = re.sub(r"\s+", " ", label)
+    if not label or len(label) > 60:
+        return ""
+    return label
 
 
 def _record_request_item(sid: str, it: dict[str, Any]) -> None:
@@ -579,7 +590,13 @@ _ORDER_SIGNALS = (
     "штакет", "забор", "сорт", "лиственниц", "сосн", "хво", "куб", "метр", "мм",
     "размер", "цен", "стоимост", "наличи", "достав", "профиль", "планкен",
 )
-_NAME_LEADINS = ("меня зовут ", "моё имя ", "мое имя ", "это ", "зовут ", "можно ", "я ")
+_NAME_LEADINS = ("меня зовут ", "зовут меня ", "моё имя ", "мое имя ", "меня ", "это ",
+                 "зовут ", "можно ", "я ")
+# Служебные слова представления: сами по себе именем не бывают. Звонок 17.10.2026 15:12
+# «Здравствуйте зовут меня антон» → Вера ответила «Очень приятно, Меня Антон!» и человек
+# бросил трубку: лидин «зовут » срезался, а «меня» уехало в имя.
+_NAME_SERVICE_WORDS = {"зовут", "меня", "мне", "моё", "мое", "мой", "моя", "имя", "это",
+                       "я", "можно", "будьте", "добры", "пожалуйста"}
 # Не имена: приветствия/служебные слова — на них отвечаем без подстановки имени.
 _NOT_NAMES = {
     "здравствуйте", "здравствуй", "привет", "приветствую", "добрый", "доброе", "добрая",
@@ -591,6 +608,7 @@ _NOT_NAMES = {
     "что", "чего", "чё", "че", "кто", "как", "какой", "куда", "где", "почему", "зачем",
     "повторите", "повтори", "слышно", "непонятно", "понятно", "мужчина", "женщина",
     "это", "ну", "так", "ой", "эм", "а",
+    "меня", "мне", "моё", "мое", "имя", "зовут",
 }
 # Имена самой Веры: «Привет, Вера» — это обращение К НЕЙ, а не имя клиента
 # (то же правило жёстко прописано в prompts.py). Но когда Вера САМА спросила
@@ -649,10 +667,15 @@ def _maybe_name(text: str, *, asked: bool = False) -> str | None:
     # терялось целиком (найдено на тестовом прогоне нового сценария 09.10.2026).
     t = re.sub(r"^\s*(здравствуй(те)?|добрый\s+(день|вечер)|доброе\s+утро|приветствую|привет|алло|ало)\b[\s,.!-]*",
                "", t, flags=re.IGNORECASE).strip()
-    low = t.lower()
-    for p in _NAME_LEADINS:
-        if low.startswith(p):
-            t = t[len(p):].strip()
+    # Лидины срезаем В ЦИКЛЕ: «зовут меня Антон» — это два лидина подряд, и за один
+    # проход оставалось «меня Антон» (звонок 17.10.2026 15:12).
+    for _ in range(3):
+        low = t.lower()
+        for p in _NAME_LEADINS:
+            if low.startswith(p):
+                t = t[len(p):].strip()
+                break
+        else:
             break
     # Знаки препинания снимаем С КАЖДОГО слова, а не только с краёв строки: на том же
     # звонке 11.10.2026 слово приходило как «Что?» и мимо _NOT_NAMES проскакивало,
@@ -662,11 +685,56 @@ def _maybe_name(text: str, *, asked: bool = False) -> str | None:
     if not words:
         return ""
     banned = (_NOT_NAMES - _BOT_OWN_NAMES) if asked else _NOT_NAMES
-    if any(w.lower() in banned for w in words):
-        return ""  # приветствие/служебное слово — поздороваемся без имени
-    if 1 <= len(words) <= 2 and all(w[:1].isalpha() for w in words):
+    clean = not any(w.lower() in banned for w in words)
+    if clean and 1 <= len(words) <= 2 and all(w[:1].isalpha() for w in words):
         return " ".join(w.capitalize() for w in words)
+    # Имя внутри фразы: «Здравствуйте, меня зовут Александр» — регуляркой по всему тексту.
+    inner = _name_in_text(text, asked=asked)
+    if inner:
+        return inner
+    # Короткая фраза, где кроме служебных слов остался ровно один кандидат:
+    # «Андрей зовут меня» → Андрей. Длинные фразы сюда не попадают — там уже просьба,
+    # а не представление, и её разбирает модель.
+    if len(words) <= 4:
+        rest = [w for w in words
+                if w.lower() not in _NAME_SERVICE_WORDS and w.lower() not in banned]
+        if len(rest) == 1 and rest[0][:1].isalpha() and len(rest[0]) >= 2:
+            return rest[0].capitalize()
     return ""
+
+
+# «…меня зовут Александр, можно Ирину» — имя стоит внутри длинной реплики. Простой разбор
+# по началу строки его не видит, и до 19.10.2026 такие звонки шли с пустым именем в заявке.
+_NAME_IN_TEXT_RE = re.compile(
+    r"\b(?:меня\s+зовут|зовут\s+меня|мо[её]\s+имя|я\s+—|это)\s+([А-ЯЁа-яё]{2,20})\b",
+    re.IGNORECASE)
+
+
+def _name_in_text(text: str, *, asked: bool = False) -> str:
+    """Имя, названное внутри длинной реплики. "" — не нашли."""
+    banned = (_NOT_NAMES - _BOT_OWN_NAMES) if asked else _NOT_NAMES
+    for m in _NAME_IN_TEXT_RE.finditer(text or ""):
+        cand = m.group(1)
+        low = cand.lower()
+        if low in banned or low in _NAME_SERVICE_WORDS:
+            continue
+        return cand.capitalize()
+    return ""
+
+
+# Первая реплика несёт не представление, а просьбу: «Здравствуйте, а Ирину будьте добры,
+# Александр». Шаблонное «Очень приятно! Расскажите, что вам нужно» на такое — это ответ
+# мимо: человек уже сказал, что ему нужно, и повторяет во второй раз (звонки 17–18.10.2026).
+def _carries_request(text: str) -> bool:
+    t = re.sub(r"^\s*(здравствуй(те)?|добрый\s+(день|вечер)|доброе\s+утро|приветствую|привет|алло|ало)\b[\s,.!-]*",
+               "", (text or "").strip(), flags=re.IGNORECASE)
+    words = [w for w in (w.strip(".,!?;:«»\"'()-") for w in t.split()) if w]
+    meaningful = [w for w in words if w.lower() not in _INTRO_ONLY_WORDS]
+    return len(meaningful) >= 4
+
+
+# Слова самого представления: «меня зовут Анна Петровна» — это ещё не просьба.
+_INTRO_ONLY_WORDS = {"зовут", "меня", "мне", "моё", "мое", "имя", "я", "это"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -749,6 +817,65 @@ _CALLBACK_ASKER_RE = re.compile(r"(пусть|прош|хочу|нужно|на�
 _CALLBACK_ACK = "Да, конечно — передам, менеджер вам перезвонит."
 # Сессии, где просьбу о звонке уже подтвердили: повторять в каждой реплике незачем.
 CALLBACK_ACKED: set[str] = set()
+
+
+# ── Просьба «соедините с человеком» ──────────────────────────────────────────
+# Самый частый запрос в живых звонках: 5 из 7 за 17–18.10.2026. До 19.10 Вера отвечала
+# импровизацией нейросети — «живых сотрудников на линии нет», что звучит как «людей тут
+# и не будет». Клиент Виктор попросил трижды и ушёл. Теперь ответ детерминированный:
+# честный, с графиком склада и без слова «нет».
+# «соединение шип-паз» — НЕ просьба соединить, поэтому только личные формы глагола.
+_OPERATOR_RE = re.compile(
+    r"(соедин(и|ите|ить|яйте)\b|переключ(и|ите|ить)\b|перевед(и|ите|ите\s+на)\b|"
+    r"оператор|с\s+менеджером|менеджера\s+(можно|дайте|позов)|"
+    r"жив(ого|ой|ую|ым)\s+(человек|связ|сотрудник)|"
+    r"к\s+телефону|позов[иь]те|трубку\s+перед|дайте\s+(кого|кому|человек))",
+    re.IGNORECASE)
+# Сколько раз за звонок клиент просил человека: на второй раз перестаём уговаривать.
+OPERATOR_ASKED: dict[str, int] = defaultdict(int)
+
+# Склад в Красном Селе: пн–пт 9–18, сб 9–15, вс — выходной (тот же график в prompts.py).
+_WORK_HOURS = {0: (9, 18), 1: (9, 18), 2: (9, 18), 3: (9, 18), 4: (9, 18), 5: (9, 15), 6: None}
+
+
+def _callback_promise(now: datetime | None = None) -> str:
+    """Когда реально перезвонит менеджер — считает код по графику склада, не нейросеть."""
+    now = now or datetime.now(_MSK)
+    today = _WORK_HOURS.get(now.weekday())
+    if today and today[0] <= now.hour < today[1]:
+        return "менеджер перезвонит сегодня, как освободится"
+    if today and now.hour < today[0]:
+        return "менеджер перезвонит сегодня с девяти утра"
+    # Рабочий день уже закрыт или выходной — ищем ближайший рабочий день.
+    for i in range(1, 8):
+        d = (now.weekday() + i) % 7
+        if _WORK_HOURS.get(d):
+            if i == 1:
+                return "менеджер перезвонит завтра с девяти утра"
+            return f"менеджер перезвонит в {_WEEKDAYS_RU[d]} с девяти утра"
+    return "менеджер перезвонит в ближайший рабочий день"
+
+
+def _asks_operator(text: str) -> bool:
+    return bool(_OPERATOR_RE.search(text or ""))
+
+
+def _operator_reply(sid: str, has_items: bool) -> str:
+    """Ответ на просьбу соединить. Первый раз — объясняем и возвращаем к заявке,
+    второй — больше не уговариваем, закрываем заявку тем, что уже есть."""
+    OPERATOR_ASKED[sid] += 1
+    promise = _callback_promise()
+    if OPERATOR_ASKED[sid] == 1:
+        tail = ("Давайте я допишу заявку — что ещё уточнить по материалу?"
+                if has_items else "Расскажите, что нужно, — запишу и передам.")
+        return (f"Сейчас никто из менеджеров не освободился, поэтому отвечаю я. "
+                f"Заявку приму и передам в сметный отдел — {promise}. {tail}")
+    if has_items:
+        return (f"Понимаю. Напрямую соединить не могу, но заявку я уже записала и "
+                f"передаю в сметный отдел — {promise} на этот номер. Хорошего дня! {END_TAG}")
+    return (f"Понимаю. Напрямую соединить не могу, но ваш номер у меня есть — передам "
+            f"в сметный отдел, {promise}. Скажите в двух словах, по какому материалу "
+            f"вопрос, чтобы менеджер перезвонил готовым.")
 
 
 def _asks_callback(text: str) -> bool:
@@ -1475,10 +1602,20 @@ def _product_reply(sid: str, per_item: list[tuple[dict[str, Any], list[dict[str,
             # клиента в заявке остаться ДОЛЖЕН: раньше Вера говорила «записала», а менеджеру
             # уходило «позиции не записаны» (звонок 11.10.2026 про вагонку 14х120).
             _record_request_item(sid, it)
-            if not it.get("length_mm"):
-                return ("Поняла, уточните, пожалуйста, длину — запишу заявку, дальше менеджер "
-                        "подскажет по наличию.")
-            label = it.get("raw") or it.get("text") or "эту позицию"
+            # Длину спрашиваем ОДИН раз за звонок (сентинел 0.0 в LENGTH_ASKED). Звонок
+            # 18.10.2026 16:14: клиент назвал террасную доску, потом сечение 28×140 — и на
+            # каждый ход получал одно и то же «уточните длину», как будто его не слышат.
+            # Трижды попросил оператора и ушёл. Второй раз не переспрашиваем: пишем как есть.
+            if not it.get("length_mm") and 0.0 not in LENGTH_ASKED[sid]:
+                LENGTH_ASKED[sid].add(0.0)
+                known = _said_label(it) or _request_ref(it)
+                head = f"Поняла, {known}. " if known else "Поняла. "
+                return (head + "Какая длина нужна — три или шесть метров? Запишу заявку, "
+                        "дальше менеджер подскажет по наличию.")
+            # Проговариваем РАЗОБРАННУЮ позицию, а не сырую расшифровку: звонок
+            # 18.10.2026 13:42 — клиенту вслух и менеджеру в заявку ушло «10 листов
+            # 10 хлыстов шестиметровых», как распознал движок речи.
+            label = _request_ref(it) or it.get("text") or "эту позицию"
             return (f"Записала — {label}. Передам заявку менеджеру, он свяжется и уточнит "
                     f"по наличию. Что-то ещё?")
         # Точного размера в наличии нет — предлагаем БЛИЖАЙШИЙ по размеру того же типа
@@ -1571,6 +1708,15 @@ async def build_reply(session_id: str, transcript: str) -> str:
     # Если клиент сразу про заказ (_maybe_name → None) — уходим в обычный ход.
     if not HISTORY[sid]:
         nm = _maybe_name(transcript)
+        if nm is not None and not _is_confused(transcript) and _carries_request(transcript):
+            # Клиент с первой секунды о деле («а Ирину будьте добры, Александр», «мне
+            # нужен брус на баню»). Шаблонное «Очень приятно! Расскажите, что вам нужно»
+            # здесь — ответ мимо: человек уже сказал, и повторяет во второй раз
+            # (звонки 17–18.10.2026). Имя из этой же фразы забираем, отвечает модель.
+            NAME[sid] = nm or _name_in_text(transcript) or NAME.get(sid, "")
+            if not NAME[sid]:
+                NAME.pop(sid, None)
+            nm = None
         if nm is not None:
             if nm:
                 NAME[sid] = nm
@@ -1631,6 +1777,20 @@ async def build_reply(session_id: str, transcript: str) -> str:
         _mark_length_mismatch(it, products)
     _log_found(sid, per_item)
     low = transcript.lower()
+
+    # ── Просьба соединить с человеком — ДЕТЕРМИНИРОВАННО ──────────────────────────
+    # 5 звонков из 7 за 17–18.10.2026. Импровизация нейросети («живых сотрудников на
+    # линии нет») звучала как отказ навсегда. Срабатывает только когда в реплике нет
+    # товарных позиций: «мне нужен брус, соедините с менеджером» — это всё-таки заказ.
+    if not items and _asks_operator(transcript):
+        answer = _operator_reply(sid, bool(ORDER.get(sid)))
+        clean_for_history, _ = split_end(answer)
+        HISTORY[sid].append({"role": "user", "content": transcript})
+        HISTORY[sid].append({"role": "assistant", "content": clean_for_history})
+        HISTORY[sid] = HISTORY[sid][-HISTORY_MAX:]
+        _log_turn(sid, "assistant", clean_for_history)
+        return answer
+
     dstate = DELIVERY[sid]
     stage = dstate.get("stage")
 
