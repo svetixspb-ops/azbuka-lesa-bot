@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -49,14 +50,51 @@ def _line_calc(it: dict[str, Any]) -> str:
     return f"{it['qty']} шт × {it['unit_price']} ₽ = {it['line_total']:,} ₽".replace(",", " ")
 
 
+# Сорт в запросе: «сорт ВС», «сорт АВ», «АВ», «1-2». Латиницу приводим к кириллице —
+# модель пишет сорт то так, то так.
+_GRADE_RE = re.compile(r"сорт\s*([абвсabc]{1,2})\b|(?<![а-яa-z])(ав|вс|аб|бс)(?![а-яa-z])",
+                       re.IGNORECASE)
+_LAT2CYR = str.maketrans({"a": "а", "b": "в", "c": "с", "A": "А", "B": "В", "C": "С"})
+
+
+def _grade_token(text: str) -> str:
+    m = _GRADE_RE.search(text or "")
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").translate(_LAT2CYR).upper()
+
+
 def _find_product(query: str, thickness=None, width=None, length=None,
                   species=None) -> dict[str, Any] | None:
+    """Резолв позиции по каталогу. Сорт уважаем ЖЁСТКО.
+
+    Диалог 18.10.2026 22:07: клиент дважды выбрал «3 вариант» — доску сорта ВС по
+    180 ₽. В заказ вставала сорт АВ по 309 ₽, потому что поиск сорт не различал и
+    отдавал первую подходящую позицию. Бука увидела чужую строку в заказе, извинилась
+    и отправила клиента к менеджеру — вместо того чтобы просто оформить выбранное.
+    """
+    want = _grade_token(query)
     res = catalog.search(text=query, thickness_mm=thickness, width_mm=width,
-                         length_mm=length, species=species, limit=1)
-    if res:
-        return res[0]
-    res = catalog.search_loose(query, limit=1)
-    return res[0] if res else None
+                         length_mm=length, species=species, limit=12)
+    if not res:
+        res = catalog.search_loose(query, limit=12)
+    if not res:
+        return None
+    if want:
+        exact = [p for p in res
+                 if _grade_token(p.get("name") or "") == want]
+        if exact:
+            res = exact
+    # Влажность клиент не называл — не ставим в заказ сухую по умолчанию (она дороже).
+    # Диалог 17.10.2026: «72 доски 50×150» легли сухими по 1 260 ₽, хотя естественной
+    # влажности те же 50×150 стоят 971 ₽ — разница на партию больше 20 000 ₽.
+    # То же правило у Веры (разворот Артёма 22.09.2026).
+    ql = (query or "").lower()
+    if "сух" not in ql and "камерн" not in ql:
+        natural = [p for p in res if "сух" not in (p.get("name") or "").lower()]
+        if natural:
+            res = natural
+    return res[0]
 
 
 def add_or_update_item(order: dict[str, Any], query: str, qty: float | None = None,

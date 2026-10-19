@@ -24,6 +24,7 @@ _CHAT_TIMEOUT = 16.0      # основной ответ — дольше нел�
 import os
 
 import catalog
+import tyos_calc
 import delivery
 import llm
 import tyos_handoff
@@ -47,7 +48,15 @@ _DIALOGS_PATH = Path(__file__).resolve().parent / "dialogs.jsonl"
 _MSK = timezone(timedelta(hours=3))
 
 
+# Пробник мониторинга бьёт по тому же /chat, что и клиент (так он и поймал падение
+# на 44 часа 24-26.07.2026) — но в журнал диалогов его писать незачем: за 17-18.10.2026
+# это 94% всех строк, и дайджест с аудитом разбирают их наравне с живыми диалогами.
+_HEALTHCHECK_PREFIX = "healthcheck"
+
+
 def _log_turn(session_id: str, role: str, content: str) -> None:
+    if str(session_id).startswith(_HEALTHCHECK_PREFIX):
+        return
     try:
         with open(_DIALOGS_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps({
@@ -235,6 +244,8 @@ async def _build_data_block(text: str, history: list[dict[str, Any]],
 
     items = extracted.get("items") or []
     lines: list[str] = []
+    calc_item: dict[str, Any] | None = None     # первая разобранная позиция — для блока РАСЧЁТ
+    calc_product: dict[str, Any] | None = None
     for it in items:
         if not (it.get("text") or it.get("thickness_mm") or it.get("width_mm")
                 or it.get("diameter_mm")):
@@ -264,6 +275,23 @@ async def _build_data_block(text: str, history: list[dict[str, Any]],
         if best.get("url"):
             line += f" | страница товара: {best['url']}"
         lines.append(line)
+        # Влажность не названа, а в каталоге есть и сухая, и естественной влажности —
+        # это выбор клиента, а не наше умолчание (диалог 17.10.2026: «72 доски 50×150»
+        # ушли сухими по 1 260 ₽ вместо 971 ₽ естественной влажности, +20 808 ₽ на партию).
+        rl = (raw or "").lower()
+        if "сух" not in rl and "естествен" not in rl:
+            dry = next((p for p in results if "сух" in (p.get("name") or "").lower()), None)
+            wet = next((p for p in results if "сух" not in (p.get("name") or "").lower()
+                        and "естествен" in (p.get("name") or "").lower()), None)
+            if dry and wet:
+                lines.append(
+                    f"   ВЫБОР ЗА КЛИЕНТОМ: влажность он не называл. Есть сухая "
+                    f"{int(dry['price'])} ₽ и естественной влажности {int(wet['price'])} ₽. "
+                    f"Покажи ОБА варианта с коротким «чем отличается» (сухая — без усадки, "
+                    f"естественной влажности — дешевле, сохнет на объекте) и спроси, какую "
+                    f"берём. НЕ выбирай сухую молча.")
+        if calc_product is None:
+            calc_item, calc_product = it, best
         _remember_item(session, best, calc)
         # ещё 1–2 альтернативы для подбора
         for alt in results[1:3]:
@@ -281,13 +309,29 @@ async def _build_data_block(text: str, history: list[dict[str, Any]],
             if sline not in lines:
                 lines.append(sline)
 
+    # ── Геометрия и арифметика — КОДОМ ───────────────────────────────────────────
+    # Диалог 17.10.2026: «пристройка 5×4, брус 150×180» → модель посчитала «2 бруса в
+    # ряду» (две стены из четырёх) и выдала 30 штук вместо ~60. Теперь числа считает
+    # tyos_calc, модель их только пересказывает. Объект («баня», «пристройка») часто
+    # назван в предыдущей реплике — поэтому склеиваем с последними ходами клиента.
+    prev = " ".join(m.get("content") or "" for m in history[-6:] if m.get("role") == "user")
+    calc_block = tyos_calc.build(
+        f"{prev} {text}".strip(),
+        item=calc_item, product=calc_product,
+        price=(calc_product or {}).get("price"),
+    )
+
     if not lines:
-        return ("ДАННЫЕ: по последней реплике конкретных товарных позиций не распознано. "
+        base = ("ДАННЫЕ: по последней реплике конкретных товарных позиций не распознано. "
                 "Если клиент назвал товар — уточни размеры/сорт; цифры не придумывай.")
+        return base + ("\n\n" + calc_block if calc_block else "")
     date = catalog.get_yml_date()
     head = (f"ДАННЫЕ (актуальные цены и наличие из каталога на {date}; "
             f"используй ТОЛЬКО это для любых цифр):")
-    return head + "\n" + "\n".join(lines)
+    out = head + "\n" + "\n".join(lines)
+    if calc_block:
+        out += "\n\n" + calc_block
+    return out
 
 
 def _strip_markdown(text: str) -> str:
@@ -458,12 +502,76 @@ def _calc_intent(text: str) -> bool:
     return bool(re.search(r"\d+\s*[xх]\s*\d+", low))
 
 
+# ── Уточнение размера ≠ вторая позиция ───────────────────────────────────────
+# Диалог 18.10.2026 13:58: клиент спросил доску 6 м, 6 шт, потом уточнил сечение
+# «40 ×6» — модель добавила ВТОРУЮ позицию и три реплики подряд спрашивала «доску
+# 50×150 убираем?». Уточнение заменяет позицию того же типа, а не копит корзину.
+_ADDITIVE_KW = ("ещё", "еще", "добав", "плюс", "тоже", "вторую", "вторая", "и доск",
+                "и брус", "к этому", "в довесок", "сверх", "отдельно", "обе", "оба")
+
+
+def _is_refinement(text: str) -> bool:
+    """Реплика похожа на уточнение размера, а не на новую позицию в заказ."""
+    low = (text or "").lower()
+    if any(k in low for k in _ADDITIVE_KW):
+        return False
+    words = [w for w in re.split(r"[\s,;]+", low) if w]
+    if len(words) > 6:
+        return False
+    return any(c.isdigit() for c in low)
+
+
+def _type_token(name: str) -> str:
+    """Тип позиции — первое значащее слово названия: «Доска сухая 50х150» → «доска»."""
+    for w in re.split(r"[\s,]+", (name or "").lower()):
+        if len(w) > 2 and w[0].isalpha():
+            return w
+    return ""
+
+
+# ── Короткое «спасибо» после переданной заявки ───────────────────────────────
+# Тот же диалог 18.10: на «спасибо» / «хорошо» Бука четыре раза подряд повторила один
+# и тот же абзац с номером телефона клиента. Дальше модель звать незачем.
+_BARE_ACK = {"спасибо", "спс", "благодарю", "хорошо", "ок", "окей", "ok", "понял",
+             "поняла", "принял", "ясно", "отлично", "супер", "здорово", "пока",
+             "всё", "все", "до", "свидания", "договорились",
+             "большое", "огромное", "вам", "тебе", "и", "за", "помощь"}
+
+
+def _is_bare_ack(text: str) -> bool:
+    """Вся реплика — только благодарность/прощание, никакой новой информации."""
+    words = [w.strip(".,!?…()") for w in (text or "").lower().split()]
+    words = [w for w in words if w]
+    if not words or len(words) > 3:
+        return False
+    return all(w in _BARE_ACK for w in words)
+
+
+_ACK_REPLIES = (
+    "Пожалуйста 🌿 Заявка у менеджера — он свяжется и подтвердит. "
+    "Если понадобится что-то ещё по материалу, просто напишите.",
+    "На связи 🌿",
+)
+
+
 async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     session = _session(session_id)
     history: list[dict[str, Any]] = session["history"]
     order: dict[str, Any] = session["order"]
 
     _log_turn(session_id, "user", text)
+
+    # Заявка уже у менеджера, клиент просто прощается — модель не зовём: она повторяла
+    # один и тот же абзац с его же номером телефона (диалог 18.10.2026 22:08–22:10).
+    if session.get("lead_sent") and _is_bare_ack(text):
+        n = session.get("ack_count", 0)
+        session["ack_count"] = n + 1
+        reply = _ACK_REPLIES[min(n, len(_ACK_REPLIES) - 1)]
+        history.append({"role": "user", "content": text})
+        history.append({"role": "assistant", "content": reply})
+        _log_turn(session_id, "assistant", reply)
+        return {"reply": reply, "chips": [], "lead": None, "actions": []}
+
     data_block = await _build_data_block(text, history, session)
 
     history.append({"role": "user", "content": text})
@@ -480,6 +588,7 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
         + [{"role": "system", "content": tyos_order.render_state(order)}]
         + extra_ctx
     )
+    items_before = set(order["items"])
     try:
         raw = await asyncio.wait_for(_run_tools(messages, order), timeout=_CHAT_TIMEOUT + 8)
         # Страховка позиций: был явный расчёт (размеры/количество), но модель не занесла
@@ -500,6 +609,17 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
         _log_turn(session_id, "assistant", fallback)  # иначе дайджест/аудит видит "нет ответа"
         asyncio.create_task(tyos_lead.alert_failure(session_id, str(e)))
         return {"reply": fallback, "chips": [], "lead": None, "actions": []}
+    # Уточнение размера заменяет прежнюю позицию того же типа, а не добавляет вторую.
+    added = set(order["items"]) - items_before
+    if len(added) == 1 and items_before and _is_refinement(text):
+        new_name = next(iter(added))
+        ttype = _type_token(new_name)
+        for key in list(items_before):
+            if ttype and _type_token(key) == ttype and key in order["items"]:
+                order["items"].pop(key)
+                log.info("refinement: %r заменила %r", new_name, key)
+        tyos_order._recompute(order)
+
     if not raw:
         raw = "Секунду, собираю заказ. Уточните, пожалуйста, последнюю позицию."
 
@@ -609,6 +729,7 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
     if contact and (contact.get("contact") or contact.get("name")):
         lead = tyos_order.to_packet(order, contact=contact, session_id=session_id)
         lead_status = await tyos_lead.deliver(lead)
+        session["lead_sent"] = True
         log.info("lead delivered: %s", lead_status)
 
     history.append({"role": "assistant", "content": visible})
