@@ -220,6 +220,8 @@ def reset(session_id: str) -> None:
     LENGTH_PENDING.pop(sid, None)
     VARIANT_ASKED.pop(sid, None)
     OPERATOR_ASKED.pop(sid, None)
+    MANAGER_REQUEST.pop(sid, None)
+    OPERATOR_ACKED.discard(sid)
     CALLBACK_ACKED.discard(sid)
     NAME.pop(sid, None)
     CALLER.pop(sid, None)
@@ -833,6 +835,12 @@ _OPERATOR_RE = re.compile(
     re.IGNORECASE)
 # Сколько раз за звонок клиент просил человека: на второй раз перестаём уговаривать.
 OPERATOR_ASKED: dict[str, int] = defaultdict(int)
+# Сколько раз клиент вообще просил живого менеджера (соединить ИЛИ перезвонить) — считаем
+# на каждой реплике, даже если ход ушёл в заказ или к нейросети. По этому счётчику заявка
+# уходит менеджеру с пометкой «просил связи» (просьба Артёма 20.10.2026).
+MANAGER_REQUEST: dict[str, int] = defaultdict(int)
+# Подтверждение просьбы о менеджере говорим ОДИН раз за звонок (как CALLBACK_ACKED).
+OPERATOR_ACKED: set[str] = set()
 
 # Склад в Красном Селе: пн–пт 9–18, сб 9–15, вс — выходной (тот же график в prompts.py).
 _WORK_HOURS = {0: (9, 18), 1: (9, 18), 2: (9, 18), 3: (9, 18), 4: (9, 18), 5: (9, 15), 6: None}
@@ -864,15 +872,16 @@ def _operator_reply(sid: str, has_items: bool) -> str:
     """Ответ на просьбу соединить. Первый раз — объясняем и возвращаем к заявке,
     второй — больше не уговариваем, закрываем заявку тем, что уже есть."""
     OPERATOR_ASKED[sid] += 1
+    OPERATOR_ACKED.add(sid)
     promise = _callback_promise()
     if OPERATOR_ASKED[sid] == 1:
         tail = ("Давайте я допишу заявку — что ещё уточнить по материалу?"
                 if has_items else "Расскажите, что нужно, — запишу и передам.")
-        return (f"Сейчас никто из менеджеров не освободился, поэтому отвечаю я. "
-                f"Заявку приму и передам в сметный отдел — {promise}. {tail}")
+        return f"Хорошо, оставлю сотрудникам напоминание — {promise}. {tail}"
     if has_items:
         return (f"Понимаю. Напрямую соединить не могу, но заявку я уже записала и "
-                f"передаю в сметный отдел — {promise} на этот номер. Хорошего дня! {END_TAG}")
+                f"передаю в сметный отдел — {promise}, ваш номер у меня есть. "
+                f"Хорошего дня! {END_TAG}")
     return (f"Понимаю. Напрямую соединить не могу, но ваш номер у меня есть — передам "
             f"в сметный отдел, {promise}. Скажите в двух словах, по какому материалу "
             f"вопрос, чтобы менеджер перезвонил готовым.")
@@ -1708,7 +1717,8 @@ async def build_reply(session_id: str, transcript: str) -> str:
     # Если клиент сразу про заказ (_maybe_name → None) — уходим в обычный ход.
     if not HISTORY[sid]:
         nm = _maybe_name(transcript)
-        if nm is not None and not _is_confused(transcript) and _carries_request(transcript):
+        if nm is not None and not _is_confused(transcript) and (
+                _carries_request(transcript) or _asks_operator(transcript)):
             # Клиент с первой секунды о деле («а Ирину будьте добры, Александр», «мне
             # нужен брус на баню»). Шаблонное «Очень приятно! Расскажите, что вам нужно»
             # здесь — ответ мимо: человек уже сказал, и повторяет во второй раз
@@ -1777,6 +1787,12 @@ async def build_reply(session_id: str, transcript: str) -> str:
         _mark_length_mismatch(it, products)
     _log_found(sid, per_item)
     low = transcript.lower()
+
+    # Просьбу о живом человеке помечаем ВСЕГДА, до всех ветвлений: ниже ход может уйти
+    # в заказ или к нейросети, и тогда пометка в заявку не попадёт. Менеджеру важно
+    # видеть такие звонки первыми, даже если Вера успела всё записать.
+    if _asks_operator(transcript) or _asks_callback(low):
+        MANAGER_REQUEST[sid] += 1
 
     # ── Просьба соединить с человеком — ДЕТЕРМИНИРОВАННО ──────────────────────────
     # 5 звонков из 7 за 17–18.10.2026. Импровизация нейросети («живых сотрудников на
@@ -1980,6 +1996,10 @@ async def build_reply(session_id: str, transcript: str) -> str:
     # иначе она теряется: детерминированные ходы нейросеть не зовут, а в её ответе
     # подтверждение может не прозвучать (см. _asks_callback). Если Вера уже сказала это
     # сама, второй раз не дублируем.
+    if _asks_operator(transcript) and sid not in OPERATOR_ACKED:
+        OPERATOR_ACKED.add(sid)
+        answer = f"Хорошо, оставлю сотрудникам напоминание — {_callback_promise()}. " + answer
+
     if _asks_callback(low) and sid not in CALLBACK_ACKED:
         CALLBACK_ACKED.add(sid)
         if not _CALLBACK_RE.search(answer):

@@ -98,6 +98,10 @@ def _render(lead: dict[str, Any]) -> str:
     if _is_test(lead["session_id"]):
         parts.append("🧪 ТЕСТОВЫЙ ПРОГОН, не настоящий звонок — номера звонящего тут нет")
     parts.append(f"📞 Заявка со звонка — {lead['ts']}")
+    # Клиент просил живого менеджера — такие звонки обзваниваются первыми (Артём, 20.10.2026).
+    if lead.get("wants_manager"):
+        again = " (просил несколько раз)" if lead["wants_manager"] > 1 else ""
+        parts.append(f"❗ ПРОСИЛ СВЯЗИ С МЕНЕДЖЕРОМ{again} — перезвонить в первую очередь")
     parts.append(f"Имя: {lead['name'] or 'не назвал'}")
     parts.append(f"Телефон: {lead['phone'] or 'номер не определился'}")
     if lead["positions"]:
@@ -214,6 +218,7 @@ def snapshot(session_id: str) -> dict[str, Any] | None:
         "phone": brain.CALLER.get(sid, ""),
         "positions": positions,
         "total": total,
+        "wants_manager": int(brain.MANAGER_REQUEST.get(sid, 0)),
         "_dialog": dialog,
     }
 
