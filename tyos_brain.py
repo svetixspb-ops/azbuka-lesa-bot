@@ -239,7 +239,7 @@ async def _build_data_block(text: str, history: list[dict[str, Any]],
         extracted = await asyncio.wait_for(llm.extract_query(text, history),
                                            timeout=_EXTRACT_TIMEOUT)
     except (Exception, asyncio.TimeoutError) as e:
-        log.warning("extract_query failed/timeout: %s", e)
+        log.warning("extract_query failed/timeout: %s", tyos_lead.describe_error(e))
         extracted = {"items": []}
 
     items = extracted.get("items") or []
@@ -602,12 +602,13 @@ async def build_reply(session_id: str, text: str) -> dict[str, Any]:
             if not raw:
                 raw = forced
     except (Exception, asyncio.TimeoutError) as e:
-        log.warning("run_tools failed/timeout: %s", e)
+        reason = tyos_lead.describe_error(e)
+        log.warning("run_tools failed/timeout: %s", reason)
         history.pop()  # не сохраняем повисшую реплику в контексте модели
         fallback = ("Извините, ответ задержался. Повторите, пожалуйста, вопрос — "
                     "или оставьте телефон, и менеджер свяжется.")
         _log_turn(session_id, "assistant", fallback)  # иначе дайджест/аудит видит "нет ответа"
-        asyncio.create_task(tyos_lead.alert_failure(session_id, str(e)))
+        asyncio.create_task(tyos_lead.alert_failure(session_id, reason))
         return {"reply": fallback, "chips": [], "lead": None, "actions": []}
     # Уточнение размера заменяет прежнюю позицию того же типа, а не добавляет вторую.
     added = set(order["items"]) - items_before

@@ -234,7 +234,30 @@ async def _send_telegram_admins(text: str) -> bool:
 
 
 _ALERT_COOLDOWN = timedelta(minutes=20)
-_last_alert_at: datetime | None = None
+# Кулдаун считаем отдельно для пробника и для живого клиента: иначе сбой на проверке
+# съедает окно, и настоящий клиентский сбой через пять минут уходит в тишину.
+_last_alert_at: dict[str, datetime] = {}
+
+# Сессии внутреннего мониторинга и наших ручных проверок: healthcheck-monitor — пробник
+# /root/bin/buka-healthcheck.sh (раз в 15 минут бьёт в тот же публичный /chat), остальные
+# префиксы — наши смоук-тесты. Их сбой не означает упущенного клиента, поэтому Артёму
+# в MAX такие алерты не уходят: 03.11.2026 он дважды получил «Бука не смог ответить
+# клиенту» про наш же пробник, а потом третий раз — про мой смоук-тест. Правило то же,
+# что с тестовыми заявками Веры: наши прогоны до клиента не доходят.
+# ВАЖНО: любой ручной тест через публичный /chat веди с session_id из этих префиксов.
+_PROBE_PREFIXES = ("healthcheck", "navi-smoke", "navi-test", "test-", "smoke-")
+
+
+def _is_probe_session(session_id: str) -> bool:
+    return (session_id or "").lower().startswith(_PROBE_PREFIXES)
+
+
+def describe_error(e: BaseException) -> str:
+    """Человекочитаемая причина для алерта: у asyncio.TimeoutError пустой str,
+    и строка «Ошибка:» уходила пустой — непонятно, что именно случилось."""
+    detail = str(e).strip()
+    name = type(e).__name__
+    return f"{name}: {detail}" if detail else name
 
 
 async def alert_failure(session_id: str, error: str) -> None:
@@ -242,20 +265,31 @@ async def alert_failure(session_id: str, error: str) -> None:
     (ошибка/таймаут LLM) — просьба Артёма, чтобы зависший диалог не узнавали через дни
     случайно (см. инцидент со сбоем DeepSeek 25-26.07). Кулдаун 20 мин: при длительном
     сбое провайдера (сотни запросов подряд) шлём один алерт, а не спамим на каждый."""
-    global _last_alert_at
+    is_probe = _is_probe_session(session_id)
+    kind = "probe" if is_probe else "client"
     now = datetime.now(MSK)
-    if _last_alert_at is not None and now - _last_alert_at < _ALERT_COOLDOWN:
+    last = _last_alert_at.get(kind)
+    if last is not None and now - last < _ALERT_COOLDOWN:
         return
-    _last_alert_at = now
-    text = ("⚠️ Бука не смог ответить клиенту (сбой/таймаут ИИ).\n"
-            f"Сессия: {session_id}\n"
-            f"Ошибка: {error}\n"
-            f"({_now_msk_iso()})\n"
-            "Если сбой продолжается — сообщения будут копиться без ответа.")
-    try:
-        await _send_max(text)
-    except Exception:
-        log.exception("alert MAX failed")
+    _last_alert_at[kind] = now
+    if is_probe:
+        text = ("⚠️ Бука не ответил пробнику мониторинга (сбой/таймаут ИИ).\n"
+                "Живого клиента в этот момент не было.\n"
+                f"Сессия: {session_id}\n"
+                f"Ошибка: {error}\n"
+                f"({_now_msk_iso()})\n"
+                "Если повторяется подряд — провайдер лежит, и клиенты тоже не получат ответ.")
+    else:
+        text = ("⚠️ Бука не смог ответить клиенту (сбой/таймаут ИИ).\n"
+                f"Сессия: {session_id}\n"
+                f"Ошибка: {error}\n"
+                f"({_now_msk_iso()})\n"
+                "Если сбой продолжается — сообщения будут копиться без ответа.")
+    if not is_probe:
+        try:
+            await _send_max(text)
+        except Exception:
+            log.exception("alert MAX failed")
     try:
         await _send_telegram_admins(text)
     except Exception:
