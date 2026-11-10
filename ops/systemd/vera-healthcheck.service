@@ -1,0 +1,6 @@
+[Unit]
+Description=Vera (azbuka-lesa-bot) voice-chain watchdog — Mango registration, SIP bridge, brain, TTS
+
+[Service]
+Type=oneshot
+ExecStart=/root/bin/vera-healthcheck.sh

@@ -1,0 +1,7 @@
+[Unit]
+Description=Vera weekly review — 7-day systemic report to Sveta (Azbuka Lesa)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/workspace/azbuka-lesa-bot
+ExecStart=/root/workspace/azbuka-lesa-bot/venv/bin/python vera_weekly_review.py

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Vera weekly review every Monday 09:00 MSK
+
+[Timer]
+OnCalendar=Mon *-*-* 06:00:00 UTC
+Persistent=true
+Unit=vera-weekly-review.service
+
+[Install]
+WantedBy=timers.target
