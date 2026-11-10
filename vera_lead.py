@@ -10,8 +10,8 @@
   суть          — 1-2 предложения от модели по полной расшифровке разговора
 
 Доставка: всегда журнал vera_leads.jsonl, плюс Telegram через @azbukalesa_bot
-(VERA_LEAD_CHAT_IDS → TG_LEAD_CHAT_ID → ADMIN_IDS) и дубль в MAX ботом Буки
-(VERA_MAX_LEAD_USER_IDS). Пустые звонки (молчание, ошиблись номером) не
+(VERA_LEAD_CHAT_IDS, пусто = никому) и дубль в MAX ботом Буки
+(VERA_MAX_LEAD_USER_IDS — с 10.11.2026 только Артём). Пустые звонки (молчание, ошиблись номером) не
 отправляем — см. _worth_sending.
 """
 from __future__ import annotations
@@ -126,17 +126,26 @@ def _render(lead: dict[str, Any]) -> str:
 
 
 def _recipients() -> list[str]:
-    raw = (os.environ.get("VERA_LEAD_CHAT_IDS")
-           or os.environ.get("TG_LEAD_CHAT_ID")
-           or os.environ.get("ADMIN_IDS") or "")
+    """Кому заявку в Telegram. Пустое, но ЗАДАННОЕ VERA_LEAD_CHAT_IDS значит «никому».
+
+    10.11.2026 Света попросила убрать заявки по звонкам из своих чатов (шум; остаётся
+    журнал + утренний дайджест + недельный разбор). Со старым `or`-каскадом пустая
+    строка проваливалась в ADMIN_IDS — и заявки вернулись бы ей же «по наследству».
+    """
+    raw = os.environ.get("VERA_LEAD_CHAT_IDS")
+    if raw is None:
+        raw = (os.environ.get("TG_LEAD_CHAT_ID") or os.environ.get("ADMIN_IDS") or "")
     return [cid.strip() for cid in raw.split(",") if cid.strip()]
 
 
 async def _send_telegram(text: str) -> bool:
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_ids = _recipients()
-    if not (token and chat_ids):
-        log.warning("заявка не отправлена: нет TELEGRAM_BOT_TOKEN или получателей")
+    if not chat_ids:
+        log.info("заявка в Telegram не отправлена: получателей нет (так и задумано)")
+        return False
+    if not token:
+        log.warning("заявка не отправлена: нет TELEGRAM_BOT_TOKEN")
         return False
     ok_all = True
     try:

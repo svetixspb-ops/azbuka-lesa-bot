@@ -44,6 +44,8 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+import vera_alert
+
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
@@ -258,9 +260,26 @@ class Call:
                 await self._play_pcm(pcm)
         except Exception as e:
             log.error("[%s] озвучка не удалась (%r): %s", self.session_id, text[:40], e)
+            # Мгновенный алерт: озвучка — единственная точка, после отказа которой
+            # человек в трубке слышит мёртвую тишину и сам кладёт её. В логе это видно
+            # только нам, поэтому сигнал уходит сразу (кулдаун внутри vera_alert).
+            self._alert("tts", vera_alert.describe(e),
+                        extra=f"Реплика, которую не удалось сказать: «{text[:120]}»")
         finally:
             if nxt is not None:
                 nxt.cancel()
+
+    def _alert(self, kind: str, detail: str, extra: str = "") -> None:
+        """Алерт о сбое — ОТДЕЛЬНОЙ задачей, никогда в линии звонка.
+
+        Отправка в Telegram — это сеть с таймаутом 15 с. Дождись её внутри хода, и
+        клиент получит эти 15 с тишины сверху: алерт сделал бы хуже, чем сам сбой.
+        """
+        try:
+            task = asyncio.create_task(vera_alert.fire(kind, detail, self.session_id, extra))
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        except Exception:
+            log.exception("[%s] не удалось поставить алерт в очередь", self.session_id)
 
     # ── единственная «занятость» звонка: Вера говорит ──────────────────────
     def _start(self, coro) -> None:
@@ -330,9 +349,13 @@ class Call:
             else:
                 log.error("[%s] API %s: %s", self.session_id, r.status_code, r.text[:300])
                 reply = TECH_ERROR
+                self._alert("api", f"HTTP {r.status_code}: {r.text[:200]}",
+                            extra="Клиент услышал «технические неполадки».")
         except Exception as e:
             log.error("[%s] запрос к мозгу не удался: %s", self.session_id, e)
             reply = TECH_ERROR
+            self._alert("brain", vera_alert.describe(e),
+                        extra="Клиент услышал «технические неполадки».")
 
         await drop_filler()
         log.info("[%s] ВЕРА: %s%s", self.session_id, reply[:200], " [конец звонка]" if end else "")
