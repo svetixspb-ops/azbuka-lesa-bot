@@ -405,7 +405,8 @@ def _order_volume_length(sid: str) -> tuple[float | None, float | None]:
 
 # Круглые товары: extract часто кладёт диаметр в thickness_mm (клиент говорит «столб 100»
 # без слова «диаметр»). Для них толщину без ширины трактуем как диаметр.
-_CYL_WORDS = ("столб", "бревн", "брёвн", "опор", "свая", "сва́", "кругл")
+_CYL_WORDS = ("столб", "бревн", "брёвн", "опор", "свая", "сва́", "кругл",
+              "колья", "кольев", "колыш", "жерд")
 
 
 def _pick_product(products: list[dict[str, Any]], it: dict[str, Any]) -> dict[str, Any] | None:
@@ -429,14 +430,22 @@ def _pick_product(products: list[dict[str, Any]], it: dict[str, Any]) -> dict[st
     return products[0]
 
 
+def _eff_dims(it: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """Размеры позиции с поправкой на круглый товар: «столб 100», «колья 80» — это диаметр.
+
+    Тот же разворот, что делает поиск; выделен отдельно, чтобы проверка «нашли ли мы
+    размер клиента» смотрела на те же поля, что и поиск.
+    """
+    text = (it.get("text") or "").lower()
+    thickness, width, diameter = it.get("thickness_mm"), it.get("width_mm"), it.get("diameter_mm")
+    if any(w in text for w in _CYL_WORDS) and not diameter and thickness and not width:
+        diameter, thickness = thickness, None
+    return thickness, width, diameter
+
+
 def _search_item(it: dict[str, Any]) -> list[dict[str, Any]]:
     """Поиск по одной товарной позиции с ослабленным fallback."""
-    text = (it.get("text") or "").lower()
-    thickness = it.get("thickness_mm")
-    width = it.get("width_mm")
-    diameter = it.get("diameter_mm")
-    if any(w in text for w in _CYL_WORDS) and not diameter and thickness and not width:
-        diameter, thickness = thickness, None   # «столб 100» → диаметр 100, не толщина
+    thickness, width, diameter = _eff_dims(it)
 
     products = catalog.search(
         text=it.get("text") or None,
@@ -497,6 +506,29 @@ def _build_context_block(per_item: list[tuple[dict[str, Any], list[dict[str, Any
                           f"в заявку как заказанное и НЕ говори «записала». Скажи честно: точно "
                           f"такого в каталоге не вижу, предложи похожее как альтернативу "
                           f"(«есть вот такое — подойдёт?») либо передай позицию в сметный отдел.")
+        # Клиент назвал размер, а среди найденных НЕТ НИ ОДНОГО с таким размером: поиск
+        # отдал соседний (разбор недели 03-09.11.2026: «колья 80 мм» → каталожные 60 мм,
+        # «брус 60 на 80» → клееный 75х75). Слово клиента при этом не выбрасывалось, поэтому
+        # пометки loose_dropped нет — и правило из промпта до этого хода не достаёт.
+        # Говорим прямо в контексте, иначе уходит молчаливая подмена размера.
+        eff_th, eff_w, eff_d = _eff_dims(it)
+        dim_miss = []
+        for want, key, word in ((eff_d, "diameter_mm", "диаметр"),
+                                (eff_th, "thickness_mm", "толщина"),
+                                (eff_w, "width_mm", "ширина")):
+            want = catalog._to_num(want)
+            if want is None:
+                continue
+            have = sorted({v for v in (catalog._to_num(p.get(key)) for p in products) if v is not None})
+            if have and not any(abs(v - want) <= 1.0 for v in have):
+                near = ", ".join(_fmt_dim(v) for v in have[:3])
+                dim_miss.append(f"{word} {_fmt_dim(want)} — в каталоге только {near}")
+        if dim_miss:
+            blocks.append("  — ВНИМАНИЕ: размера, который назвал клиент, среди товаров ниже НЕТ: "
+                          + "; ".join(dim_miss) + ". Скажи это ВСЛУХ и назови отличие прямо "
+                          "(«точно восьмидесяти нет, есть шестьдесят — подойдёт?»). НЕ записывай "
+                          "соседний размер как заказанный, пока клиент не согласился, и в повторе "
+                          "заказа называй размер КЛИЕНТА, а не каталожный.")
         # Клиент назвал сорт, которого у найденных позиций нет. Молча подставить ближайший
         # нельзя: клиент будет уверен, что заказал своё (звонок 10.10.2026 — просил сорт БЦ,
         # в заявку ушёл ВС). См. _mark_grade_mismatch.
@@ -1975,7 +2007,12 @@ async def build_reply(session_id: str, transcript: str) -> str:
             # Мультизаказ / уточнение / разные типы — отвечает LLM (без цифр цен, см. промпт).
             context_block = _build_context_block(per_item, asked_avail=asked_avail, asked_price=asked_price)
             for it, products in per_item:
-                if products:
+                # В заказ пишем товар каталога ТОЛЬКО если он совпадает с названным размером.
+                # Иначе в заявку уходила соседняя позиция, и в повторе заказа звучал её
+                # размер, а не размер клиента (разбор недели 03-09.11.2026: просили колья
+                # 80 мм — в повторе «диаметр 60»). Размер клиента держим в заявке, пока он
+                # сам не согласился на другой: сметный отдел подберёт замену.
+                if products and any(_exact_match(pr, it) for pr in products):
                     _record_order_item(sid, it, products)
                 elif (it.get("text") or "").strip():
                     # Товара в каталоге нет совсем, а Вера обещает «передам в сметный отдел» —
